@@ -13,6 +13,7 @@
 #include "Atlas.hpp"
 #include "Draw.hpp"
 
+#include <algorithm>
 #include <math.h>
 #include <numeric>
 
@@ -191,15 +192,15 @@ void Atlas::processGrid()
 
             // If this cell has an initial offset, use it, otherwise use
             // the base one.
-            std::pair<bool, Point> offInfo = m_field.initialOffset(c);
-            Point pos;
-            if (offInfo.first)
-                pos = offInfo.second;
-            else
+            auto [valid, pos, spread] = m_field.initialOffset(c);
+            if (!valid)
+            {
                 pos = m_shift;
+                spread = 3.0;
+            }
 
             // The offset is updated if processing works.
-            if (process(c, pos))
+            if (process(c, pos, spread))
                 m_field.setOffset(c, pos);
 
             // This starts in the lower left corner and goes around in
@@ -244,7 +245,7 @@ void Atlas::dumpSurrounding()
     }
 }
 
-bool Atlas::process(Coord coord, Point& offset)
+bool Atlas::process(Coord coord, Point& offset, double spread)
 {
     using namespace pdal;
 
@@ -336,7 +337,7 @@ bool Atlas::process(Coord coord, Point& offset)
     sortShapes(bg);
     sortShapes(ag);
 
-    std::vector<ShapePair> shapes = matchShapes(bg, ag);
+    std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
     if (shapes.empty())
         return false;
     auto [mean, median] = calculateOffset(bg, ag, shapes);
@@ -383,9 +384,10 @@ void Atlas::dumpShapes(GridPtr& g)
 }
 
 
-std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
+std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread)
 {
     std::vector<ShapePair> matches;
+    double threshold = std::clamp(spread, 1.0, 3.0);
 
     // Build a list of shape pointers
     std::list<Shape *> asp;
@@ -410,7 +412,7 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
                 exactMatch = it;
             }
         }
-        if (minExactDist > 2.0)
+        if (minExactDist > threshold)
             continue;
 
         if (m_dumpij == m_coord)

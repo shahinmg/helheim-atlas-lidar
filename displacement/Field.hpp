@@ -112,7 +112,10 @@ public:
     bool valid(Coord c)
     { return pos(c) >= 0; }
 
-    std::pair<bool, Point> initialOffset(Coord c)
+    // Returns {valid, estimated_offset, rms_spread_of_neighbors}.
+    // Spread is the weighted RMS deviation of neighbor offsets from the mean;
+    // used to set an adaptive match threshold in matchShapes.
+    std::tuple<bool, Point, double> initialOffset(Coord c)
     {
         const double Sqrt2Recip = 0.70710678118;
         double x = 0;
@@ -134,7 +137,7 @@ public:
         if (idx >= 0)
         {
             if (m_valid[idx])
-                return { true, { m_x[idx], m_y[idx] } };
+                return { true, { m_x[idx], m_y[idx] }, 0.0 };
 
             // We weight each full neighbor equally and each corner neighbor
             // by 1/sqrt(2)
@@ -150,10 +153,33 @@ public:
             {
                 x /= sum;
                 y /= sum;
-                return { true, { x, y } };
+
+                // Weighted RMS deviation of neighbors from the computed mean.
+                double variance = 0;
+                auto addVariance = [&](Coord nc, double rel)
+                {
+                    int nidx = pos(nc);
+                    if (nidx >= 0 && m_valid[nidx])
+                    {
+                        double dx = m_x[nidx] - x;
+                        double dy = m_y[nidx] - y;
+                        variance += rel * (dx * dx + dy * dy);
+                    }
+                };
+                addVariance(Coord(c.first + 1, c.second), 1);
+                addVariance(Coord(c.first - 1, c.second), 1);
+                addVariance(Coord(c.first, c.second + 1), 1);
+                addVariance(Coord(c.first, c.second - 1), 1);
+                addVariance(Coord(c.first + 1, c.second + 1), Sqrt2Recip);
+                addVariance(Coord(c.first - 1, c.second + 1), Sqrt2Recip);
+                addVariance(Coord(c.first + 1, c.second - 1), Sqrt2Recip);
+                addVariance(Coord(c.first - 1, c.second - 1), Sqrt2Recip);
+                double spread = std::sqrt(variance / sum);
+
+                return { true, { x, y }, spread };
             }
         }
-        return { false, { 0, 0 } };
+        return { false, { 0, 0 }, 3.0 };
     }
 
 private:

@@ -35,13 +35,13 @@ private:
     void dumpShapes(GridPtr& g);
     void dumpSurrounding();
     Coord splitterCoord(const Coord& c) const;
-    std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag);
+    std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag, double threshold);
     std::pair<Point, Point> calculateOffset(GridPtr& bg, GridPtr& ag,
         const std::vector<ShapePair>& shapes);
     void addArgs();
     void load();
     void parse(const pdal::StringList& s);
-    bool process(Coord c, Point& offset);
+    bool process(Coord c, Point& offset, double spread);
     void processGrid();
     void throwError(const std::string& s);
     void writeSimple();
