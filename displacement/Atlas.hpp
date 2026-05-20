@@ -88,6 +88,8 @@ private:
     const double m_len = 100.0;
     const double m_overlap = 20.0;
     std::vector<ShapeRecord> m_shapeRecords;
+    std::string m_tiffDir;
+    std::string m_geojsonDir;
 };
 
 } // namespace

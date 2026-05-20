@@ -14,6 +14,7 @@
 #include "Draw.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <math.h>
 #include <numeric>
 
@@ -83,6 +84,8 @@ void Atlas::addArgs()
     m_args.add("dumpxy", "XY pos in UTM meters to dump", m_dumpxy, Point(-1000, -1000));
     m_args.add("dumpij", "IJ pos in grid index to dump", m_dumpij, Coord(-1000, -1000));
     m_args.add("dumpfrac", "Top Fraction to be used for dump", m_dumpfrac, .1);
+    m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
+    m_args.add("geojson", "Output directory for shapes GeoJSON", m_geojsonDir, std::string());
 }
 
 void Atlas::parse(const pdal::StringList& slist)
@@ -110,13 +113,21 @@ void Atlas::run(const pdal::StringList& s)
     {
         load();
         processGrid();
-        writeShapeGeoJSON("shapes.geojson");
+        namespace fs = std::filesystem;
+        fs::path geojsonPath = m_geojsonDir.empty()
+            ? fs::path("shapes.geojson")
+            : fs::path(m_geojsonDir) / "shapes.geojson";
+        writeShapeGeoJSON(geojsonPath.string());
 
         pdal::SplitterFilter *splitter =
             dynamic_cast<pdal::SplitterFilter *>(m_beforeMgr.getStage());
         writeSvg("vector.svg", splitter->extent());
-        std::string filename = pdal::FileUtils::stem(m_beforeFilename) + ".tif";
-        writeTiff(filename);
+        std::string tiffStem = pdal::FileUtils::stem(m_beforeFilename) + "_" +
+            pdal::FileUtils::stem(m_afterFilename) + ".tif";
+        fs::path tiffPath = m_tiffDir.empty()
+            ? fs::path(tiffStem)
+            : fs::path(m_tiffDir) / tiffStem;
+        writeTiff(tiffPath.string());
 //        read(filename);
     }
     catch (const pdal::pdal_error& err)
