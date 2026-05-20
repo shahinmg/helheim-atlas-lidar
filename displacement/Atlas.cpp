@@ -152,6 +152,7 @@ void Atlas::load()
     splitterOpts.add("length", m_len);
     splitterOpts.add("origin_x", m_origin.x);
     splitterOpts.add("origin_y", m_origin.y);
+    splitterOpts.add("overlap", m_overlap);
 
     StageCreationOptions bOps { m_beforeFilename };
     Stage& beforeReader = m_beforeMgr.makeReader(bOps);
@@ -164,6 +165,7 @@ void Atlas::load()
     afterSplitterOpts.add("length", m_len);
     afterSplitterOpts.add("origin_x", m_origin.x + m_shift.x);
     afterSplitterOpts.add("origin_y", m_origin.y + m_shift.y);
+    afterSplitterOpts.add("overlap", m_overlap);
 
     StageCreationOptions aOps { m_afterFilename };
     Stage& afterReader = m_afterMgr.makeReader(aOps);
@@ -267,12 +269,31 @@ bool Atlas::process(Coord coord, Point& offset)
     if (slice->empty())
         return false;
 
+    // box is the nominal core tile bounds (without overlap).
+    // Shift the grid origin back by m_overlap so buffer-zone points bin into
+    // negative grid indices and flood-fill can cross the tile boundary.
     BOX2D box = splitter->bounds(splitterCoord(coord));
-    Point origin { box.minx, box.miny };
+    Point bgOrigin { box.minx - m_overlap, box.miny - m_overlap };
     if (coord == m_dumpij)
         slice = debugView;
-    GridPtr bg = buildGrid(slice, origin);
+    GridPtr bg = buildGrid(slice, bgOrigin);
     bg->findShapes(2);
+
+    // Remove shapes whose center is outside the core tile. These are pure
+    // buffer-zone blobs that belong to an adjacent cell's core area.
+    const double gridLen = 2.0;
+    auto inCoreBox = [&](const Shape& s, const Point& origin, const BOX2D& core) {
+        double utmX = origin.x + (s.exactCenter().x + 0.5) * gridLen;
+        double utmY = origin.y + (s.exactCenter().y + 0.5) * gridLen;
+        return utmX >= core.minx && utmX < core.maxx &&
+               utmY >= core.miny && utmY < core.maxy;
+    };
+
+    auto& bgShapes = bg->shapes();
+    bgShapes.erase(
+        std::remove_if(bgShapes.begin(), bgShapes.end(),
+            [&](const Shape& s){ return !inCoreBox(s, bgOrigin, box); }),
+        bgShapes.end());
 
     splitter = dynamic_cast<SplitterFilter *>(m_afterMgr.getStage());
     v = splitter->view(splitterCoord(coord));
@@ -292,14 +313,22 @@ bool Atlas::process(Coord coord, Point& offset)
     // The splitter for the "after" tiles is offset by m_shift.
     // If we want the grid to line up with the tile, the offset should be
     // m_shift, but we use an offset here that tries to account for what
-    // we've learned since we stared processing.
+    // we've learned since we started processing.
     //
     // Note here that "box" is the origin of the BEFORE points.
-    origin = { box.minx + offset.x, box.miny + offset.y };
+    BOX2D afterCore { box.minx + offset.x, box.miny + offset.y,
+                      box.maxx + offset.x, box.maxy + offset.y };
+    Point agOrigin { box.minx + offset.x - m_overlap, box.miny + offset.y - m_overlap };
     if (coord == m_dumpij)
         slice = debugView;
-    GridPtr ag = buildGrid(slice, origin);
+    GridPtr ag = buildGrid(slice, agOrigin);
     ag->findShapes(2);
+
+    auto& agShapes = ag->shapes();
+    agShapes.erase(
+        std::remove_if(agShapes.begin(), agShapes.end(),
+            [&](const Shape& s){ return !inCoreBox(s, agOrigin, afterCore); }),
+        agShapes.end());
 
 
 

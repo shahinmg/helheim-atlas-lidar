@@ -72,6 +72,7 @@ private:
     pdal::PipelineManager m_beforeMgr;
     pdal::PipelineManager m_afterMgr;
     const double m_len = 100.0;
+    const double m_overlap = 20.0;
 };
 
 } // namespace
