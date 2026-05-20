@@ -20,6 +20,7 @@ class Field
 public:
     Field(size_t width, size_t height) : m_width(width), m_height(height),
         m_x(width * height), m_y(width * height), m_z(width * height),
+        m_medianX(width * height), m_medianY(width * height), m_medianZ(width * height),
         m_before(width * height), m_after(width * height), m_valid(width * height),
         m_maxLen2(std::numeric_limits<double>::lowest())
     {}
@@ -32,6 +33,15 @@ public:
 
     const float *zdata() const
     { return m_z.data(); }
+
+    const float *medianXdata() const
+    { return m_medianX.data(); }
+
+    const float *medianYdata() const
+    { return m_medianY.data(); }
+
+    const float *medianZdata() const
+    { return m_medianZ.data(); }
 
     const float *bdata() const
     { return m_before.data(); }
@@ -60,6 +70,17 @@ public:
         m_y[idx] = displacement.y;
         m_z[idx] = displacement.z;
         m_valid[idx] = true;
+    }
+
+    void setMedianOffset(Coord c, Point displacement)
+    {
+        size_t idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_medianX[idx] = displacement.x;
+        m_medianY[idx] = displacement.y;
+        m_medianZ[idx] = displacement.z;
     }
 
     void setBeforeCount(Coord c, float count)
@@ -143,6 +164,9 @@ private:
     std::vector<float> m_x;
     std::vector<float> m_y;
     std::vector<float> m_z;
+    std::vector<float> m_medianX;
+    std::vector<float> m_medianY;
+    std::vector<float> m_medianZ;
     std::vector<float> m_before;
     std::vector<float> m_after;
     std::vector<bool> m_valid;

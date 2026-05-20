@@ -14,6 +14,7 @@
 #include "Draw.hpp"
 
 #include <math.h>
+#include <numeric>
 
 #include <pdal/private/gdal/GDALUtils.hpp>
 #include <pdal/private/gdal/Raster.hpp>
@@ -338,7 +339,9 @@ bool Atlas::process(Coord coord, Point& offset)
     std::vector<ShapePair> shapes = matchShapes(bg, ag);
     if (shapes.empty())
         return false;
-    offset = calculateOffset(bg, ag, shapes);
+    auto [mean, median] = calculateOffset(bg, ag, shapes);
+    offset = mean;
+    m_field.setMedianOffset(coord, median);
 
 
 
@@ -427,16 +430,11 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
 }
 
 
-Point Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
+std::pair<Point, Point> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
-    double centerX = 0;
-    double centerY = 0;
-    double centerZ = 0;
-    double minX = 0;
-    double minY = 0;
-    double maxX = 0;
-    double maxY = 0;
+    std::vector<double> pairX, pairY, pairZ;
+
     for (const ShapePair& sp : shapes)
     {
         Point bCenter, bHigh;
@@ -445,39 +443,30 @@ Point Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
         pdal::BOX2D bExtent = bg->location(sp.first, bCenter, bHigh);
         pdal::BOX2D aExtent = ag->location(sp.second, aCenter, aHigh);
 
-        centerX += aCenter.x - bCenter.x;
-        centerY += aCenter.y - bCenter.y;
-        centerZ += aCenter.z - bCenter.z;
-        minX += aExtent.minx - bExtent.minx,
-        minY += aExtent.miny - bExtent.miny;
-        maxX += aExtent.maxx - bExtent.maxx;
-        maxY += aExtent.maxy - bExtent.maxy;
-
+        pairX.push_back(((aCenter.x - bCenter.x) +
+                         (aExtent.minx - bExtent.minx) +
+                         (aExtent.maxx - bExtent.maxx)) / 3.0);
+        pairY.push_back(((aCenter.y - bCenter.y) +
+                         (aExtent.miny - bExtent.miny) +
+                         (aExtent.maxy - bExtent.maxy)) / 3.0);
+        pairZ.push_back(aCenter.z - bCenter.z);
     }
-    centerX /= shapes.size();
-    centerY /= shapes.size();
-    centerZ /= shapes.size();
-    minX /= shapes.size();
-    minY /= shapes.size();
-    maxX /= shapes.size();
-    maxY /= shapes.size();
-    double totalX = (centerX + minX + maxX) / 3;
-    double totalY = (centerY + minY + maxY) / 3;
-    double totalZ = centerZ;
 
-    /**
-    auto print = [](const std::string& s, double x, double y)
-    {
-        std::cout << s << " - " << x << "/" << y << "!\n";
+    auto calcMedian = [](std::vector<double> v) -> double {
+        std::sort(v.begin(), v.end());
+        size_t n = v.size();
+        return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
     };
 
-    print("Center", centerX, centerY);
-    print("Min", minX, minY);
-    print("Max", maxX, maxY);
-    print("Total", totalX, totalY);
-    **/
+    double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
+    double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
+    double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
+    size_t n = shapes.size();
 
-    return {totalX, totalY, totalZ};
+    Point mean { sumX / n, sumY / n, sumZ / n };
+    Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
+
+    return { mean, median };
 }
 
 
@@ -620,17 +609,20 @@ void Atlas::writeTiff(const std::string& filename)
 
     gdal::registerDrivers();
     gdal::Raster raster(filename, "GTiff", "EPSG:32624", pixelToPos);
-    gdal::GDALError err = raster.open(xsize, ysize, 5,
+    gdal::GDALError err = raster.open(xsize, ysize, 8,
         Dimension::Type::Float, -9999, pdal::StringList());
 
     if (err != gdal::GDALError::None)
         throwError(raster.errorMsg());
     {
-        raster.writeBand(m_field.xdata(), -9999.0, 1, "X");
-        raster.writeBand(m_field.ydata(), -9999.0, 2, "Y");
-        raster.writeBand(m_field.zdata(), -9999.0, 3, "Z");
-        raster.writeBand(m_field.bdata(), -9999.0, 4, "BEFORE");
-        raster.writeBand(m_field.adata(), -9999.0, 5, "AFTER");
+        raster.writeBand(m_field.xdata(),       -9999.0, 1, "X");
+        raster.writeBand(m_field.ydata(),       -9999.0, 2, "Y");
+        raster.writeBand(m_field.zdata(),       -9999.0, 3, "Z");
+        raster.writeBand(m_field.bdata(),       -9999.0, 4, "BEFORE");
+        raster.writeBand(m_field.adata(),       -9999.0, 5, "AFTER");
+        raster.writeBand(m_field.medianXdata(), -9999.0, 6, "MEDIAN_X");
+        raster.writeBand(m_field.medianYdata(), -9999.0, 7, "MEDIAN_Y");
+        raster.writeBand(m_field.medianZdata(), -9999.0, 8, "MEDIAN_Z");
     }
 }
 
