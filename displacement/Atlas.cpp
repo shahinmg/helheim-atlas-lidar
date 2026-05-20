@@ -410,6 +410,10 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double sprea
         {
             Shape *ts = *it;
 
+            double sizeRatio = (double)s.size() / ts->size();
+            if (sizeRatio > 3.0 || sizeRatio < (1.0 / 3.0))
+                continue;
+
             Point bp = s.exactCenter();
             Point ap = ts->exactCenter();
             double exactDist = std::sqrt(std::pow(bp.x - ap.x, 2) + std::pow(bp.y - ap.y, 2));
