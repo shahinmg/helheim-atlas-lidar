@@ -193,7 +193,12 @@ void Atlas::processGrid()
 {
     Coord start {XCellCount / 2, YCellCount / 2};
 
-    for (int i = 0; i <= 70; ++i)
+    // Spiral must reach the farthest cell from start; process() filters
+    // out-of-bounds coords via m_field.valid().
+    int maxRadius = std::max({start.first, start.second,
+        XCellCount - start.first - 1, YCellCount - start.second - 1});
+
+    for (int i = 0; i <= maxRadius; ++i)
     {
         int y = -i;
         int x = -i;

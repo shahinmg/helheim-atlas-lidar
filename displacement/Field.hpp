@@ -67,7 +67,7 @@ public:
 
     void setOffset(Coord c, Point displacement)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -81,7 +81,7 @@ public:
 
     void setMatchQuality(Coord c, int count, float rms)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -91,7 +91,7 @@ public:
 
     void setMedianOffset(Coord c, Point displacement)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -102,7 +102,7 @@ public:
 
     void setBeforeCount(Coord c, float count)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -111,7 +111,7 @@ public:
 
     void setAfterCount(Coord c, float count)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -120,7 +120,7 @@ public:
 
     Point offset(Coord c)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return Point();
         return Point(m_x[idx], m_y[idx], m_z[idx]);
