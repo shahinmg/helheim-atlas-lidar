@@ -176,7 +176,7 @@ void Atlas::load()
     splitterOpts.add("length", m_len);
     splitterOpts.add("origin_x", m_origin.x);
     splitterOpts.add("origin_y", m_origin.y);
-    splitterOpts.add("overlap", m_overlap);
+    splitterOpts.add("buffer", m_overlap);
 
     StageCreationOptions bOps { m_beforeFilename };
     Stage& beforeReader = m_beforeMgr.makeReader(bOps);
@@ -189,7 +189,7 @@ void Atlas::load()
     afterSplitterOpts.add("length", m_len);
     afterSplitterOpts.add("origin_x", m_origin.x + m_shift.x);
     afterSplitterOpts.add("origin_y", m_origin.y + m_shift.y);
-    afterSplitterOpts.add("overlap", m_overlap);
+    afterSplitterOpts.add("buffer", m_overlap);
 
     StageCreationOptions aOps { m_afterFilename };
     Stage& afterReader = m_afterMgr.makeReader(aOps);
