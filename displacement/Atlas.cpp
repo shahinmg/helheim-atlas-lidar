@@ -286,31 +286,8 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     if (slice->empty())
         return false;
 
-    // box is the nominal core tile bounds (without overlap).
-    // Shift the grid origin back by m_overlap so buffer-zone points bin into
-    // negative grid indices and flood-fill can cross the tile boundary.
+    PointViewPtr beforeSlice = slice;
     BOX2D box = splitter->bounds(splitterCoord(coord));
-    Point bgOrigin { box.minx - m_overlap, box.miny - m_overlap };
-    if (coord == m_dumpij)
-        slice = debugView;
-    GridPtr bg = buildGrid(slice, bgOrigin);
-    bg->findShapes(2);
-
-    // Remove shapes whose center is outside the core tile. These are pure
-    // buffer-zone blobs that belong to an adjacent cell's core area.
-    const double gridLen = 2.0;
-    auto inCoreBox = [&](const Shape& s, const Point& origin, const BOX2D& core) {
-        double utmX = origin.x + (s.exactCenter().x + 0.5) * gridLen;
-        double utmY = origin.y + (s.exactCenter().y + 0.5) * gridLen;
-        return utmX >= core.minx && utmX < core.maxx &&
-               utmY >= core.miny && utmY < core.maxy;
-    };
-
-    auto& bgShapes = bg->shapes();
-    bgShapes.erase(
-        std::remove_if(bgShapes.begin(), bgShapes.end(),
-            [&](const Shape& s){ return !inCoreBox(s, bgOrigin, box); }),
-        bgShapes.end());
 
     splitter = dynamic_cast<SplitterFilter *>(m_afterMgr.getStage());
     v = splitter->view(splitterCoord(coord));
@@ -329,59 +306,23 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     slice = hist[hist.size() - 1];
     if (slice->empty())
         return false;
+    PointViewPtr afterSlice = slice;
 
-    // The splitter for the "after" tiles is offset by m_shift.
-    // If we want the grid to line up with the tile, the offset should be
-    // m_shift, but we use an offset here that tries to account for what
-    // we've learned since we started processing.
-    //
-    // Note here that "box" is the origin of the BEFORE points.
-    BOX2D afterCore { box.minx + offset.x, box.miny + offset.y,
-                      box.maxx + offset.x, box.maxy + offset.y };
-    Point agOrigin { box.minx + offset.x - m_overlap, box.miny + offset.y - m_overlap };
-    if (coord == m_dumpij)
-        slice = debugView;
-    GridPtr ag = buildGrid(slice, agOrigin);
-    ag->findShapes(2);
+    const int rasterW = (int)(m_len / 2.0);
+    const int rasterH = (int)(m_len / 2.0);
+    const int searchRadius = 5;
 
-    auto& agShapes = ag->shapes();
-    agShapes.erase(
-        std::remove_if(agShapes.begin(), agShapes.end(),
-            [&](const Shape& s){ return !inCoreBox(s, agOrigin, afterCore); }),
-        agShapes.end());
+    Raster br = buildRaster(beforeSlice, {box.minx, box.miny}, rasterW, rasterH);
+    Raster ar = buildRaster(afterSlice,
+        {box.minx + offset.x, box.miny + offset.y}, rasterW, rasterH);
 
-
-
-    sortShapes(bg);
-    sortShapes(ag);
-
-    std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
-    recordShapes(bg, true,  coord, bgOrigin, shapes);
-    recordShapes(ag, false, coord, agOrigin, shapes);
-    if (shapes.empty())
+    auto [nccDisp, nccPeak] = nccOffset(br, ar, searchRadius);
+    if (nccPeak < 0)
         return false;
-    auto [mean, median, rmsResidual] = calculateOffset(bg, ag, shapes);
-    offset = mean;
-    m_field.setMedianOffset(coord, median);
-    m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
 
-
-
-    if (m_dumpij == coord)
-    {
-        /**
-        dumpShapes(bg);
-        dumpShapes(ag);
-        **/
-
-        // Draw with point counts.
-        bg->draw(0, 0, 49, 49, false);
-        ag->draw(0, 0, 49, 49, false);
-
-        // Draw with shape numbers.
-        bg->draw(0, 0, 49, 49, true);
-        ag->draw(0, 0, 49, 49, true);
-    }
+    offset = nccDisp;
+    m_field.setMedianOffset(coord, nccDisp);
+    m_field.setMatchQuality(coord, 1, 1.0f - (float)nccPeak);
 
     return true;
 }
@@ -695,6 +636,145 @@ void Atlas::read(const std::string& filename)
             x << "/" << y << "/" << vx << "/" << vy << "/" << std::sqrt(vx * vx + vy * vy) << "!\n";
     }
 }
+
+Raster Atlas::buildRaster(pdal::PointViewPtr v, Point origin, int width, int height)
+{
+    using namespace pdal;
+    const double cellSize = 2.0;
+    Raster r(width, height);
+
+    for (PointId idx = 0; idx < v->size(); ++idx)
+    {
+        double x = v->getFieldAs<double>(Dimension::Id::X, idx) - origin.x;
+        double y = v->getFieldAs<double>(Dimension::Id::Y, idx) - origin.y;
+        double z = v->getFieldAs<double>(Dimension::Id::Z, idx);
+
+        int xi = (int)(x / cellSize);
+        int yi = (int)(y / cellSize);
+
+        if (xi < 0 || xi >= width || yi < 0 || yi >= height)
+            continue;
+
+        float& cell = r.at(xi, yi);
+        if (std::isnan(cell) || z > (double)cell)
+            cell = (float)z;
+    }
+    return r;
+}
+
+
+std::pair<Point, double> Atlas::nccOffset(const Raster& br, const Raster& ar, int searchRadius)
+{
+    const double cellSize = 2.0;
+    const int minValid = 10;
+
+    double bestNcc = -2.0;
+    int bestDx = 0, bestDy = 0;
+
+    int diameter = 2 * searchRadius + 1;
+    std::vector<double> nccSurface(diameter * diameter, -2.0);
+
+    auto nccAt = [&](int dx, int dy) -> double& {
+        return nccSurface[(dy + searchRadius) * diameter + (dx + searchRadius)];
+    };
+
+    for (int dy = -searchRadius; dy <= searchRadius; ++dy)
+    {
+        for (int dx = -searchRadius; dx <= searchRadius; ++dx)
+        {
+            double sumB = 0, sumA = 0;
+            int count = 0;
+
+            for (int y = searchRadius; y < br.height - searchRadius; ++y)
+                for (int x = searchRadius; x < br.width - searchRadius; ++x)
+                    if (br.valid(x, y) && ar.valid(x + dx, y + dy))
+                    {
+                        sumB += br.at(x, y);
+                        sumA += ar.at(x + dx, y + dy);
+                        count++;
+                    }
+
+            if (count < minValid)
+                continue;
+
+            double meanB = sumB / count;
+            double meanA = sumA / count;
+
+            double num = 0, varB = 0, varA = 0;
+            double dZ = 0;
+            for (int y = searchRadius; y < br.height - searchRadius; ++y)
+                for (int x = searchRadius; x < br.width - searchRadius; ++x)
+                    if (br.valid(x, y) && ar.valid(x + dx, y + dy))
+                    {
+                        double db = br.at(x, y) - meanB;
+                        double da = ar.at(x + dx, y + dy) - meanA;
+                        num  += db * da;
+                        varB += db * db;
+                        varA += da * da;
+                        dZ   += ar.at(x + dx, y + dy) - br.at(x, y);
+                    }
+
+            double denom = std::sqrt(varB * varA);
+            if (denom < 1e-10)
+                continue;
+
+            double ncc = num / denom;
+            nccAt(dx, dy) = ncc;
+            if (ncc > bestNcc)
+            {
+                bestNcc = ncc;
+                bestDx = dx;
+                bestDy = dy;
+            }
+        }
+    }
+
+    if (bestNcc < -1.0)
+        return { {0, 0, 0}, -1.0 };
+
+    // Recompute dZ at the best integer offset
+    double dZ = 0;
+    int zCount = 0;
+    for (int y = searchRadius; y < br.height - searchRadius; ++y)
+        for (int x = searchRadius; x < br.width - searchRadius; ++x)
+            if (br.valid(x, y) && ar.valid(x + bestDx, y + bestDy))
+            {
+                dZ += ar.at(x + bestDx, y + bestDy) - br.at(x, y);
+                zCount++;
+            }
+    if (zCount > 0) dZ /= zCount;
+
+    // Subpixel refinement via parabolic fit
+    double subDx = bestDx;
+    double subDy = bestDy;
+
+    if (bestDx > -searchRadius && bestDx < searchRadius)
+    {
+        double l = nccAt(bestDx - 1, bestDy);
+        double r = nccAt(bestDx + 1, bestDy);
+        if (l > -1.5 && r > -1.5)
+        {
+            double d = 2 * bestNcc - l - r;
+            if (std::abs(d) > 1e-10)
+                subDx = bestDx - 0.5 * (r - l) / d;
+        }
+    }
+
+    if (bestDy > -searchRadius && bestDy < searchRadius)
+    {
+        double dn = nccAt(bestDx, bestDy - 1);
+        double up = nccAt(bestDx, bestDy + 1);
+        if (dn > -1.5 && up > -1.5)
+        {
+            double d = 2 * bestNcc - dn - up;
+            if (std::abs(d) > 1e-10)
+                subDy = bestDy - 0.5 * (up - dn) / d;
+        }
+    }
+
+    return { {subDx * cellSize, subDy * cellSize, dZ}, bestNcc };
+}
+
 
 void Atlas::recordShapes(GridPtr& g, bool isBefore, Coord tile, Point origin,
     const std::vector<ShapePair>& matches)

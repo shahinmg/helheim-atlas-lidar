@@ -16,6 +16,7 @@
 
 #include "Field.hpp"
 #include "Grid.hpp"
+#include "Raster.hpp"
 
 namespace AtlasProcessor
 {
@@ -63,6 +64,9 @@ private:
     void recordShapes(GridPtr& g, bool isBefore, Coord tile, Point origin,
         const std::vector<ShapePair>& matches);
     void writeShapeGeoJSON(const std::string& filename);
+    Raster buildRaster(pdal::PointViewPtr v, Point origin, int width, int height);
+    std::pair<Point, double> nccOffset(const Raster& before, const Raster& after,
+        int searchRadius);
 
     pdal::ProgramArgs m_args;
     std::string m_beforeFilename;
