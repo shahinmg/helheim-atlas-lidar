@@ -90,6 +90,7 @@ private:
     std::vector<ShapeRecord> m_shapeRecords;
     std::string m_tiffDir;
     std::string m_geojsonDir;
+    std::string m_svgDir;
 };
 
 } // namespace

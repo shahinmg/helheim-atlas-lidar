@@ -85,7 +85,10 @@ void Atlas::addArgs()
     m_args.add("dumpij", "IJ pos in grid index to dump", m_dumpij, Coord(-1000, -1000));
     m_args.add("dumpfrac", "Top Fraction to be used for dump", m_dumpfrac, .1);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
-    m_args.add("geojson", "Output directory for shapes GeoJSON", m_geojsonDir, std::string());
+    m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
+        m_geojsonDir, std::string());
+    m_args.add("svg", "Output directory for vector SVG (omit to skip)",
+        m_svgDir, std::string());
 }
 
 void Atlas::parse(const pdal::StringList& slist)
@@ -114,19 +117,26 @@ void Atlas::run(const pdal::StringList& s)
         load();
         processGrid();
         namespace fs = std::filesystem;
-        fs::path geojsonPath = m_geojsonDir.empty()
-            ? fs::path("shapes.geojson")
-            : fs::path(m_geojsonDir) / "shapes.geojson";
-        writeShapeGeoJSON(geojsonPath.string());
+        std::string stem = pdal::FileUtils::stem(m_beforeFilename) + "_" +
+            pdal::FileUtils::stem(m_afterFilename);
 
-        pdal::SplitterFilter *splitter =
-            dynamic_cast<pdal::SplitterFilter *>(m_beforeMgr.getStage());
-        writeSvg("vector.svg", splitter->extent());
-        std::string tiffStem = pdal::FileUtils::stem(m_beforeFilename) + "_" +
-            pdal::FileUtils::stem(m_afterFilename) + ".tif";
+        if (!m_geojsonDir.empty())
+        {
+            fs::path geojsonPath = fs::path(m_geojsonDir) / (stem + ".geojson");
+            writeShapeGeoJSON(geojsonPath.string());
+        }
+
+        if (!m_svgDir.empty())
+        {
+            pdal::SplitterFilter *splitter =
+                dynamic_cast<pdal::SplitterFilter *>(m_beforeMgr.getStage());
+            fs::path svgPath = fs::path(m_svgDir) / (stem + ".svg");
+            writeSvg(svgPath.string(), splitter->extent());
+        }
+
         fs::path tiffPath = m_tiffDir.empty()
-            ? fs::path(tiffStem)
-            : fs::path(m_tiffDir) / tiffStem;
+            ? fs::path(stem + ".tif")
+            : fs::path(m_tiffDir) / (stem + ".tif");
         writeTiff(tiffPath.string());
 //        read(filename);
     }
@@ -757,10 +767,13 @@ void Atlas::writeShapeGeoJSON(const std::string& filename)
                 << "[" << minx << "," << miny << "]"
                 << "]]";
         }
+        // Flip tile_j from internal Y-down to Y-up so it aligns with the
+        // map orientation in QGIS (large tile_j = north).
+        int tileJ = YCellCount - rec.tile.second - 1;
         out << "]},\"properties\":{"
             << "\"scan\":\"" << (rec.isBefore ? "before" : "after") << "\","
             << "\"tile_i\":" << rec.tile.first << ","
-            << "\"tile_j\":" << rec.tile.second << ","
+            << "\"tile_j\":" << tileJ << ","
             << "\"shape_id\":" << rec.id << ","
             << "\"size\":" << rec.indices.size() << ","
             << "\"matched\":" << (rec.matched ? "true" : "false") << ",";
