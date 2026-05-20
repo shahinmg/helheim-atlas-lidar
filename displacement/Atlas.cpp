@@ -264,8 +264,11 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     if (coord == m_dumpij)
         debugView = v->makeNew();
     Histogram hist = histogram(v, Dimension::Id::Z, debugView, "Before");
-    if (removeFliers(v, hist))
-        hist = histogram(v, Dimension::Id::Z, debugView, "Before");
+    for (int pass = 0; pass < 3; ++pass)
+        if (!removeFliers(v, hist))
+            break;
+        else
+            hist = histogram(v, Dimension::Id::Z, debugView, "Before");
 
     PointViewPtr slice = hist[hist.size() - 1];
     if (slice->empty())
@@ -306,8 +309,11 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     if (coord == m_dumpij)
         debugView = v->makeNew();
     hist = histogram(v, Dimension::Id::Z, debugView, "After");
-    if (removeFliers(v, hist))
-        hist = histogram(v, Dimension::Id::Z, debugView, "After");
+    for (int pass = 0; pass < 3; ++pass)
+        if (!removeFliers(v, hist))
+            break;
+        else
+            hist = histogram(v, Dimension::Id::Z, debugView, "After");
     slice = hist[hist.size() - 1];
     if (slice->empty())
         return false;
@@ -340,9 +346,10 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
     if (shapes.empty())
         return false;
-    auto [mean, median] = calculateOffset(bg, ag, shapes);
+    auto [mean, median, rmsResidual] = calculateOffset(bg, ag, shapes);
     offset = mean;
     m_field.setMedianOffset(coord, median);
+    m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
 
 
 
@@ -432,7 +439,7 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double sprea
 }
 
 
-std::pair<Point, Point> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
+std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
     std::vector<double> pairX, pairY, pairZ;
@@ -468,7 +475,16 @@ std::pair<Point, Point> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     Point mean { sumX / n, sumY / n, sumZ / n };
     Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
 
-    return { mean, median };
+    double rmsResidual = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        double dx = pairX[i] - mean.x;
+        double dy = pairY[i] - mean.y;
+        rmsResidual += dx * dx + dy * dy;
+    }
+    rmsResidual = std::sqrt(rmsResidual / n);
+
+    return { mean, median, rmsResidual };
 }
 
 
@@ -611,20 +627,22 @@ void Atlas::writeTiff(const std::string& filename)
 
     gdal::registerDrivers();
     gdal::Raster raster(filename, "GTiff", "EPSG:32624", pixelToPos);
-    gdal::GDALError err = raster.open(xsize, ysize, 8,
+    gdal::GDALError err = raster.open(xsize, ysize, 10,
         Dimension::Type::Float, -9999, pdal::StringList());
 
     if (err != gdal::GDALError::None)
         throwError(raster.errorMsg());
     {
-        raster.writeBand(m_field.xdata(),       -9999.0, 1, "X");
-        raster.writeBand(m_field.ydata(),       -9999.0, 2, "Y");
-        raster.writeBand(m_field.zdata(),       -9999.0, 3, "Z");
-        raster.writeBand(m_field.bdata(),       -9999.0, 4, "BEFORE");
-        raster.writeBand(m_field.adata(),       -9999.0, 5, "AFTER");
-        raster.writeBand(m_field.medianXdata(), -9999.0, 6, "MEDIAN_X");
-        raster.writeBand(m_field.medianYdata(), -9999.0, 7, "MEDIAN_Y");
-        raster.writeBand(m_field.medianZdata(), -9999.0, 8, "MEDIAN_Z");
+        raster.writeBand(m_field.xdata(),            -9999.0, 1,  "X");
+        raster.writeBand(m_field.ydata(),            -9999.0, 2,  "Y");
+        raster.writeBand(m_field.zdata(),            -9999.0, 3,  "Z");
+        raster.writeBand(m_field.bdata(),            -9999.0, 4,  "BEFORE");
+        raster.writeBand(m_field.adata(),            -9999.0, 5,  "AFTER");
+        raster.writeBand(m_field.medianXdata(),      -9999.0, 6,  "MEDIAN_X");
+        raster.writeBand(m_field.medianYdata(),      -9999.0, 7,  "MEDIAN_Y");
+        raster.writeBand(m_field.medianZdata(),      -9999.0, 8,  "MEDIAN_Z");
+        raster.writeBand(m_field.matchCountData(),   -9999.0, 9,  "MATCH_COUNT");
+        raster.writeBand(m_field.rmsResidualData(),  -9999.0, 10, "RMS_RESIDUAL");
     }
 }
 

@@ -36,7 +36,7 @@ private:
     void dumpSurrounding();
     Coord splitterCoord(const Coord& c) const;
     std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag, double threshold);
-    std::pair<Point, Point> calculateOffset(GridPtr& bg, GridPtr& ag,
+    std::tuple<Point, Point, double> calculateOffset(GridPtr& bg, GridPtr& ag,
         const std::vector<ShapePair>& shapes);
     void addArgs();
     void load();

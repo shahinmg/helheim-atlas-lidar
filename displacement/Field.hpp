@@ -22,6 +22,7 @@ public:
         m_x(width * height), m_y(width * height), m_z(width * height),
         m_medianX(width * height), m_medianY(width * height), m_medianZ(width * height),
         m_before(width * height), m_after(width * height), m_valid(width * height),
+        m_matchCount(width * height), m_rmsResidual(width * height),
         m_maxLen2(std::numeric_limits<double>::lowest())
     {}
 
@@ -49,6 +50,12 @@ public:
     const float *adata() const
     { return m_after.data(); }
 
+    const float *matchCountData() const
+    { return m_matchCount.data(); }
+
+    const float *rmsResidualData() const
+    { return m_rmsResidual.data(); }
+
     size_t width() const
     { return m_width; }
 
@@ -70,6 +77,16 @@ public:
         m_y[idx] = displacement.y;
         m_z[idx] = displacement.z;
         m_valid[idx] = true;
+    }
+
+    void setMatchQuality(Coord c, int count, float rms)
+    {
+        size_t idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_matchCount[idx] = static_cast<float>(count);
+        m_rmsResidual[idx] = rms;
     }
 
     void setMedianOffset(Coord c, Point displacement)
@@ -195,6 +212,8 @@ private:
     std::vector<float> m_medianZ;
     std::vector<float> m_before;
     std::vector<float> m_after;
+    std::vector<float> m_matchCount;
+    std::vector<float> m_rmsResidual;
     std::vector<bool> m_valid;
     double m_maxLen2;
 
