@@ -110,6 +110,7 @@ void Atlas::run(const pdal::StringList& s)
     {
         load();
         processGrid();
+        writeShapeGeoJSON("shapes.geojson");
 
         pdal::SplitterFilter *splitter =
             dynamic_cast<pdal::SplitterFilter *>(m_beforeMgr.getStage());
@@ -344,6 +345,8 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     sortShapes(ag);
 
     std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
+    recordShapes(bg, true,  coord, bgOrigin, shapes);
+    recordShapes(ag, false, coord, agOrigin, shapes);
     if (shapes.empty())
         return false;
     auto [mean, median, rmsResidual] = calculateOffset(bg, ag, shapes);
@@ -680,6 +683,78 @@ void Atlas::read(const std::string& filename)
         std::cout << "x/y/vx/vy/total " <<
             x << "/" << y << "/" << vx << "/" << vy << "/" << std::sqrt(vx * vx + vy * vy) << "!\n";
     }
+}
+
+void Atlas::recordShapes(GridPtr& g, bool isBefore, Coord tile, Point origin,
+    const std::vector<ShapePair>& matches)
+{
+    for (const Shape& s : g->shapes())
+    {
+        bool matched = false;
+        size_t matchId = std::numeric_limits<size_t>::max();
+        for (const ShapePair& sp : matches)
+        {
+            const Shape* check   = isBefore ? sp.first  : sp.second;
+            const Shape* partner = isBefore ? sp.second : sp.first;
+            if (check == &s)
+            {
+                matched = true;
+                matchId = partner->id();
+                break;
+            }
+        }
+        m_shapeRecords.push_back({s.indices(), origin, isBefore, tile, s.id(), matched, matchId});
+    }
+}
+
+
+void Atlas::writeShapeGeoJSON(const std::string& filename)
+{
+    std::ofstream out(filename);
+    out << std::fixed << std::setprecision(2);
+    out << "{\"type\":\"FeatureCollection\","
+           "\"crs\":{\"type\":\"name\",\"properties\":{\"name\":\"EPSG:32624\"}},"
+           "\"features\":[\n";
+
+    bool firstFeature = true;
+    for (const ShapeRecord& rec : m_shapeRecords)
+    {
+        if (!firstFeature) out << ",\n";
+        firstFeature = false;
+
+        out << "{\"type\":\"Feature\",\"geometry\":"
+               "{\"type\":\"MultiPolygon\",\"coordinates\":[";
+        bool firstCell = true;
+        for (const GridIndex& gi : rec.indices)
+        {
+            if (!firstCell) out << ",";
+            firstCell = false;
+            double minx = rec.origin.x + gi.x() * 2.0;
+            double miny = rec.origin.y + gi.y() * 2.0;
+            double maxx = minx + 2.0;
+            double maxy = miny + 2.0;
+            out << "[["
+                << "[" << minx << "," << miny << "],"
+                << "[" << maxx << "," << miny << "],"
+                << "[" << maxx << "," << maxy << "],"
+                << "[" << minx << "," << maxy << "],"
+                << "[" << minx << "," << miny << "]"
+                << "]]";
+        }
+        out << "]},\"properties\":{"
+            << "\"scan\":\"" << (rec.isBefore ? "before" : "after") << "\","
+            << "\"tile_i\":" << rec.tile.first << ","
+            << "\"tile_j\":" << rec.tile.second << ","
+            << "\"shape_id\":" << rec.id << ","
+            << "\"size\":" << rec.indices.size() << ","
+            << "\"matched\":" << (rec.matched ? "true" : "false") << ",";
+        if (rec.matched)
+            out << "\"match_id\":" << rec.matchId;
+        else
+            out << "\"match_id\":null";
+        out << "}}";
+    }
+    out << "\n]}\n";
 }
 
 } // namespace

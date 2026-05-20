@@ -20,6 +20,17 @@
 namespace AtlasProcessor
 {
 
+struct ShapeRecord
+{
+    std::vector<GridIndex> indices;
+    Point origin;
+    bool isBefore;
+    Coord tile;
+    size_t id;
+    bool matched;
+    size_t matchId;  // SIZE_MAX if unmatched
+};
+
 class Atlas
 {
 public:
@@ -49,6 +60,9 @@ private:
     void writeSvg(const std::string& filename, const pdal::BOX2D& extent);
     void read(const std::string& filename);
     bool shouldDump() const;
+    void recordShapes(GridPtr& g, bool isBefore, Coord tile, Point origin,
+        const std::vector<ShapePair>& matches);
+    void writeShapeGeoJSON(const std::string& filename);
 
     pdal::ProgramArgs m_args;
     std::string m_beforeFilename;
@@ -73,6 +87,7 @@ private:
     pdal::PipelineManager m_afterMgr;
     const double m_len = 100.0;
     const double m_overlap = 20.0;
+    std::vector<ShapeRecord> m_shapeRecords;
 };
 
 } // namespace
