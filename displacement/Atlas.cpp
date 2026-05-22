@@ -86,7 +86,9 @@ void Atlas::addArgs()
     m_args.add("topfrac", "Top fraction of points by Z used for surface slice (default 0.5)",
         m_dumpfrac, 0.5);
     m_args.add("minshape", "Minimum shape size in grid cells; smaller shapes are dropped "
-        "before matching (default 2)", m_minShape, 2);
+        "before matching (default 1, disables filter)", m_minShape, 1);
+    m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
+        "(default 1.0)", m_gridLen, 1.0);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -110,6 +112,8 @@ void Atlas::parse(const pdal::StringList& slist)
         fatal("'topfrac' must be a value in the range (0,1].");
     if (m_minShape < 1)
         fatal("'minshape' must be >= 1.");
+    if (m_gridLen <= 0)
+        fatal("'gridlen' must be > 0.");
 }
 
 void Atlas::run(const pdal::StringList& s)
@@ -320,10 +324,9 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
     // Remove shapes whose center is outside the core tile. These are pure
     // buffer-zone blobs that belong to an adjacent cell's core area.
-    const double gridLen = 2.0;
     auto inCoreBox = [&](const Shape& s, const Point& origin, const BOX2D& core) {
-        double utmX = origin.x + (s.exactCenter().x + 0.5) * gridLen;
-        double utmY = origin.y + (s.exactCenter().y + 0.5) * gridLen;
+        double utmX = origin.x + (s.exactCenter().x + 0.5) * m_gridLen;
+        double utmY = origin.y + (s.exactCenter().y + 0.5) * m_gridLen;
         return utmX >= core.minx && utmX < core.maxx &&
                utmY >= core.miny && utmY < core.maxy;
     };
@@ -599,7 +602,7 @@ GridPtr Atlas::buildGrid(pdal::PointViewPtr v, Point origin)
 
     std::sort(v->begin(), v->end(), cmp);
 
-    return GridPtr(new Grid(v, 2, origin));
+    return GridPtr(new Grid(v, m_gridLen, origin));
 }
 
 
@@ -759,10 +762,10 @@ void Atlas::writeShapeGeoJSON(const std::string& filename)
         {
             if (!firstCell) out << ",";
             firstCell = false;
-            double minx = rec.origin.x + gi.x() * 2.0;
-            double miny = rec.origin.y + gi.y() * 2.0;
-            double maxx = minx + 2.0;
-            double maxy = miny + 2.0;
+            double minx = rec.origin.x + gi.x() * m_gridLen;
+            double miny = rec.origin.y + gi.y() * m_gridLen;
+            double maxx = minx + m_gridLen;
+            double maxy = miny + m_gridLen;
             out << "[["
                 << "[" << minx << "," << miny << "],"
                 << "[" << maxx << "," << miny << "],"

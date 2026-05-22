@@ -83,6 +83,7 @@ private:
     Point m_dumpxy;
     double m_dumpfrac;
     int m_minShape;
+    double m_gridLen;
 
     pdal::PipelineManager m_beforeMgr;
     pdal::PipelineManager m_afterMgr;
