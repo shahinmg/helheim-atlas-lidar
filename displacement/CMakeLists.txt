@@ -24,5 +24,5 @@ target_link_libraries(atlas
 
 target_compile_features(atlas
     PRIVATE
-        cxx_std_11
+        cxx_std_17
 )

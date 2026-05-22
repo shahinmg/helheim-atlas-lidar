@@ -13,7 +13,10 @@
 #include "Atlas.hpp"
 #include "Draw.hpp"
 
+#include <algorithm>
+#include <filesystem>
 #include <math.h>
+#include <numeric>
 
 #include <pdal/private/gdal/GDALUtils.hpp>
 #include <pdal/private/gdal/Raster.hpp>
@@ -80,7 +83,17 @@ void Atlas::addArgs()
     m_args.add("yshift", "Y distance shift", m_shift.y).setPositional();
     m_args.add("dumpxy", "XY pos in UTM meters to dump", m_dumpxy, Point(-1000, -1000));
     m_args.add("dumpij", "IJ pos in grid index to dump", m_dumpij, Coord(-1000, -1000));
-    m_args.add("dumpfrac", "Top Fraction to be used for dump", m_dumpfrac, .1);
+    m_args.add("topfrac", "Top fraction of points by Z used for surface slice (default 0.5)",
+        m_dumpfrac, 0.5);
+    m_args.add("minshape", "Minimum shape size in grid cells; smaller shapes are dropped "
+        "before matching (default 1, disables filter)", m_minShape, 1);
+    m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
+        "(default 1.0)", m_gridLen, 1.0);
+    m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
+    m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
+        m_geojsonDir, std::string());
+    m_args.add("svg", "Output directory for vector SVG (omit to skip)",
+        m_svgDir, std::string());
 }
 
 void Atlas::parse(const pdal::StringList& slist)
@@ -95,9 +108,12 @@ void Atlas::parse(const pdal::StringList& slist)
     }
     if (m_dumpxy != Point(-1000, -1000) && m_dumpij != Coord(-1000, -1000))
         fatal("Can't specifify both 'dumpxy' and 'dumpij'.");
-    if (m_dumpfrac < 0 || m_dumpfrac > 1)
-        fatal("'dumpfrac' must be a value in the range (0,1].");
-    m_dumpfrac = 1 - m_dumpfrac;
+    if (m_dumpfrac <= 0 || m_dumpfrac > 1)
+        fatal("'topfrac' must be a value in the range (0,1].");
+    if (m_minShape < 1)
+        fatal("'minshape' must be >= 1.");
+    if (m_gridLen <= 0)
+        fatal("'gridlen' must be > 0.");
 }
 
 void Atlas::run(const pdal::StringList& s)
@@ -108,12 +124,28 @@ void Atlas::run(const pdal::StringList& s)
     {
         load();
         processGrid();
+        namespace fs = std::filesystem;
+        std::string stem = pdal::FileUtils::stem(m_beforeFilename) + "_" +
+            pdal::FileUtils::stem(m_afterFilename);
 
-        pdal::SplitterFilter *splitter =
-            dynamic_cast<pdal::SplitterFilter *>(m_beforeMgr.getStage());
-        writeSvg("vector.svg", splitter->extent());
-        std::string filename = pdal::FileUtils::stem(m_beforeFilename) + ".tif";
-        writeTiff(filename);
+        if (!m_geojsonDir.empty())
+        {
+            fs::path geojsonPath = fs::path(m_geojsonDir) / (stem + ".geojson");
+            writeShapeGeoJSON(geojsonPath.string());
+        }
+
+        if (!m_svgDir.empty())
+        {
+            pdal::SplitterFilter *splitter =
+                dynamic_cast<pdal::SplitterFilter *>(m_beforeMgr.getStage());
+            fs::path svgPath = fs::path(m_svgDir) / (stem + ".svg");
+            writeSvg(svgPath.string(), splitter->extent());
+        }
+
+        fs::path tiffPath = m_tiffDir.empty()
+            ? fs::path(stem + ".tif")
+            : fs::path(m_tiffDir) / (stem + ".tif");
+        writeTiff(tiffPath.string());
 //        read(filename);
     }
     catch (const pdal::pdal_error& err)
@@ -152,6 +184,7 @@ void Atlas::load()
     splitterOpts.add("length", m_len);
     splitterOpts.add("origin_x", m_origin.x);
     splitterOpts.add("origin_y", m_origin.y);
+    splitterOpts.add("buffer", m_overlap);
 
     StageCreationOptions bOps { m_beforeFilename };
     Stage& beforeReader = m_beforeMgr.makeReader(bOps);
@@ -164,6 +197,7 @@ void Atlas::load()
     afterSplitterOpts.add("length", m_len);
     afterSplitterOpts.add("origin_x", m_origin.x + m_shift.x);
     afterSplitterOpts.add("origin_y", m_origin.y + m_shift.y);
+    afterSplitterOpts.add("buffer", m_overlap);
 
     StageCreationOptions aOps { m_afterFilename };
     Stage& afterReader = m_afterMgr.makeReader(aOps);
@@ -177,7 +211,12 @@ void Atlas::processGrid()
 {
     Coord start {XCellCount / 2, YCellCount / 2};
 
-    for (int i = 0; i <= 70; ++i)
+    // Spiral must reach the farthest cell from start; process() filters
+    // out-of-bounds coords via m_field.valid().
+    int maxRadius = std::max({start.first, start.second,
+        XCellCount - start.first - 1, YCellCount - start.second - 1});
+
+    for (int i = 0; i <= maxRadius; ++i)
     {
         int y = -i;
         int x = -i;
@@ -188,15 +227,15 @@ void Atlas::processGrid()
 
             // If this cell has an initial offset, use it, otherwise use
             // the base one.
-            std::pair<bool, Point> offInfo = m_field.initialOffset(c);
-            Point pos;
-            if (offInfo.first)
-                pos = offInfo.second;
-            else
+            auto [valid, pos, spread] = m_field.initialOffset(c);
+            if (!valid)
+            {
                 pos = m_shift;
+                spread = 3.0;
+            }
 
             // The offset is updated if processing works.
-            if (process(c, pos))
+            if (process(c, pos, spread))
                 m_field.setOffset(c, pos);
 
             // This starts in the lower left corner and goes around in
@@ -241,7 +280,7 @@ void Atlas::dumpSurrounding()
     }
 }
 
-bool Atlas::process(Coord coord, Point& offset)
+bool Atlas::process(Coord coord, Point& offset, double spread)
 {
     using namespace pdal;
 
@@ -260,19 +299,46 @@ bool Atlas::process(Coord coord, Point& offset)
     if (coord == m_dumpij)
         debugView = v->makeNew();
     Histogram hist = histogram(v, Dimension::Id::Z, debugView, "Before");
-    if (removeFliers(v, hist))
-        hist = histogram(v, Dimension::Id::Z, debugView, "Before");
+    for (int pass = 0; pass < 3; ++pass)
+        if (!removeFliers(v, hist))
+            break;
+        else
+            hist = histogram(v, Dimension::Id::Z, debugView, "Before");
 
-    PointViewPtr slice = hist[hist.size() - 1];
+    std::sort(v->begin(), v->end(),
+        [](const PointRef& a, const PointRef& b)
+            { return a.compare(Dimension::Id::Z, b); });
+    PointViewPtr slice = v->makeNew();
+    for (PointId i = (PointId)(v->size() * (1.0 - m_dumpfrac)); i < v->size(); ++i)
+        slice->appendPoint(*v, i);
     if (slice->empty())
         return false;
 
+    // box is the nominal core tile bounds (without overlap).
+    // Shift the grid origin back by m_overlap so buffer-zone points bin into
+    // negative grid indices and flood-fill can cross the tile boundary.
     BOX2D box = splitter->bounds(splitterCoord(coord));
-    Point origin { box.minx, box.miny };
-    if (coord == m_dumpij)
-        slice = debugView;
-    GridPtr bg = buildGrid(slice, origin);
+    Point bgOrigin { box.minx - m_overlap, box.miny - m_overlap };
+    GridPtr bg = buildGrid(slice, bgOrigin);
     bg->findShapes(2);
+
+    // Remove shapes whose center is outside the core tile. These are pure
+    // buffer-zone blobs that belong to an adjacent cell's core area.
+    auto inCoreBox = [&](const Shape& s, const Point& origin, const BOX2D& core) {
+        double utmX = origin.x + (s.exactCenter().x + 0.5) * m_gridLen;
+        double utmY = origin.y + (s.exactCenter().y + 0.5) * m_gridLen;
+        return utmX >= core.minx && utmX < core.maxx &&
+               utmY >= core.miny && utmY < core.maxy;
+    };
+
+    auto& bgShapes = bg->shapes();
+    bgShapes.erase(
+        std::remove_if(bgShapes.begin(), bgShapes.end(),
+            [&](const Shape& s){
+                return !inCoreBox(s, bgOrigin, box) ||
+                       s.size() < (size_t)m_minShape;
+            }),
+        bgShapes.end());
 
     splitter = dynamic_cast<SplitterFilter *>(m_afterMgr.getStage());
     v = splitter->view(splitterCoord(coord));
@@ -283,51 +349,61 @@ bool Atlas::process(Coord coord, Point& offset)
     if (coord == m_dumpij)
         debugView = v->makeNew();
     hist = histogram(v, Dimension::Id::Z, debugView, "After");
-    if (removeFliers(v, hist))
-        hist = histogram(v, Dimension::Id::Z, debugView, "After");
-    slice = hist[hist.size() - 1];
+    for (int pass = 0; pass < 3; ++pass)
+        if (!removeFliers(v, hist))
+            break;
+        else
+            hist = histogram(v, Dimension::Id::Z, debugView, "After");
+    std::sort(v->begin(), v->end(),
+        [](const PointRef& a, const PointRef& b)
+            { return a.compare(Dimension::Id::Z, b); });
+    slice = v->makeNew();
+    for (PointId i = (PointId)(v->size() * (1.0 - m_dumpfrac)); i < v->size(); ++i)
+        slice->appendPoint(*v, i);
     if (slice->empty())
         return false;
 
     // The splitter for the "after" tiles is offset by m_shift.
     // If we want the grid to line up with the tile, the offset should be
     // m_shift, but we use an offset here that tries to account for what
-    // we've learned since we stared processing.
+    // we've learned since we started processing.
     //
     // Note here that "box" is the origin of the BEFORE points.
-    origin = { box.minx + offset.x, box.miny + offset.y };
-    if (coord == m_dumpij)
-        slice = debugView;
-    GridPtr ag = buildGrid(slice, origin);
+    BOX2D afterCore { box.minx + offset.x, box.miny + offset.y,
+                      box.maxx + offset.x, box.maxy + offset.y };
+    Point agOrigin { box.minx + offset.x - m_overlap, box.miny + offset.y - m_overlap };
+    GridPtr ag = buildGrid(slice, agOrigin);
     ag->findShapes(2);
 
-
+    auto& agShapes = ag->shapes();
+    agShapes.erase(
+        std::remove_if(agShapes.begin(), agShapes.end(),
+            [&](const Shape& s){
+                return !inCoreBox(s, agOrigin, afterCore) ||
+                       s.size() < (size_t)m_minShape;
+            }),
+        agShapes.end());
 
     sortShapes(bg);
     sortShapes(ag);
 
-    std::vector<ShapePair> shapes = matchShapes(bg, ag);
-    if (shapes.empty())
-        return false;
-    offset = calculateOffset(bg, ag, shapes);
-
-
-
     if (m_dumpij == coord)
     {
-        /**
-        dumpShapes(bg);
-        dumpShapes(ag);
-        **/
-
-        // Draw with point counts.
         bg->draw(0, 0, 49, 49, false);
         ag->draw(0, 0, 49, 49, false);
-
-        // Draw with shape numbers.
         bg->draw(0, 0, 49, 49, true);
         ag->draw(0, 0, 49, 49, true);
     }
+
+    std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
+    recordShapes(bg, true,  coord, bgOrigin, shapes);
+    recordShapes(ag, false, coord, agOrigin, shapes);
+    if (shapes.empty())
+        return false;
+    auto [mean, median, rmsResidual] = calculateOffset(bg, ag, shapes);
+    offset = mean;
+    m_field.setMedianOffset(coord, median);
+    m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
 
     return true;
 }
@@ -351,9 +427,10 @@ void Atlas::dumpShapes(GridPtr& g)
 }
 
 
-std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
+std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread)
 {
     std::vector<ShapePair> matches;
+    double threshold = std::clamp(spread, 2.5, 4.0);
 
     // Build a list of shape pointers
     std::list<Shape *> asp;
@@ -369,6 +446,10 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
         {
             Shape *ts = *it;
 
+            double sizeRatio = (double)s.size() / ts->size();
+            if (sizeRatio > 3.0 || sizeRatio < (1.0 / 3.0))
+                continue;
+
             Point bp = s.exactCenter();
             Point ap = ts->exactCenter();
             double exactDist = std::sqrt(std::pow(bp.x - ap.x, 2) + std::pow(bp.y - ap.y, 2));
@@ -378,7 +459,7 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
                 exactMatch = it;
             }
         }
-        if (minExactDist > 2.0)
+        if (minExactDist > threshold)
             continue;
 
         if (m_dumpij == m_coord)
@@ -398,16 +479,11 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag)
 }
 
 
-Point Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
+std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
-    double centerX = 0;
-    double centerY = 0;
-    double centerZ = 0;
-    double minX = 0;
-    double minY = 0;
-    double maxX = 0;
-    double maxY = 0;
+    std::vector<double> pairX, pairY, pairZ;
+
     for (const ShapePair& sp : shapes)
     {
         Point bCenter, bHigh;
@@ -416,39 +492,39 @@ Point Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
         pdal::BOX2D bExtent = bg->location(sp.first, bCenter, bHigh);
         pdal::BOX2D aExtent = ag->location(sp.second, aCenter, aHigh);
 
-        centerX += aCenter.x - bCenter.x;
-        centerY += aCenter.y - bCenter.y;
-        centerZ += aCenter.z - bCenter.z;
-        minX += aExtent.minx - bExtent.minx,
-        minY += aExtent.miny - bExtent.miny;
-        maxX += aExtent.maxx - bExtent.maxx;
-        maxY += aExtent.maxy - bExtent.maxy;
-
+        pairX.push_back(((aCenter.x - bCenter.x) +
+                         (aExtent.minx - bExtent.minx) +
+                         (aExtent.maxx - bExtent.maxx)) / 3.0);
+        pairY.push_back(((aCenter.y - bCenter.y) +
+                         (aExtent.miny - bExtent.miny) +
+                         (aExtent.maxy - bExtent.maxy)) / 3.0);
+        pairZ.push_back(aCenter.z - bCenter.z);
     }
-    centerX /= shapes.size();
-    centerY /= shapes.size();
-    centerZ /= shapes.size();
-    minX /= shapes.size();
-    minY /= shapes.size();
-    maxX /= shapes.size();
-    maxY /= shapes.size();
-    double totalX = (centerX + minX + maxX) / 3;
-    double totalY = (centerY + minY + maxY) / 3;
-    double totalZ = centerZ;
 
-    /**
-    auto print = [](const std::string& s, double x, double y)
-    {
-        std::cout << s << " - " << x << "/" << y << "!\n";
+    auto calcMedian = [](std::vector<double> v) -> double {
+        std::sort(v.begin(), v.end());
+        size_t n = v.size();
+        return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
     };
 
-    print("Center", centerX, centerY);
-    print("Min", minX, minY);
-    print("Max", maxX, maxY);
-    print("Total", totalX, totalY);
-    **/
+    double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
+    double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
+    double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
+    size_t n = shapes.size();
 
-    return {totalX, totalY, totalZ};
+    Point mean { sumX / n, sumY / n, sumZ / n };
+    Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
+
+    double rmsResidual = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        double dx = pairX[i] - mean.x;
+        double dy = pairY[i] - mean.y;
+        rmsResidual += dx * dx + dy * dy;
+    }
+    rmsResidual = std::sqrt(rmsResidual / n);
+
+    return { mean, median, rmsResidual };
 }
 
 
@@ -479,7 +555,7 @@ Histogram Atlas::histogram(pdal::PointViewPtr v, pdal::Dimension::Id dim,
             idx = 9;
         splits[idx]->appendPoint(*v, id);
 
-        if (debugView && (val - mn) / (mx - mn) > m_dumpfrac)
+        if (debugView && (val - mn) / (mx - mn) > (1.0 - m_dumpfrac))
             debugView->appendPoint(*v, id);
     }
 
@@ -526,7 +602,7 @@ GridPtr Atlas::buildGrid(pdal::PointViewPtr v, Point origin)
 
     std::sort(v->begin(), v->end(), cmp);
 
-    return GridPtr(new Grid(v, 2, origin));
+    return GridPtr(new Grid(v, m_gridLen, origin));
 }
 
 
@@ -591,17 +667,22 @@ void Atlas::writeTiff(const std::string& filename)
 
     gdal::registerDrivers();
     gdal::Raster raster(filename, "GTiff", "EPSG:32624", pixelToPos);
-    gdal::GDALError err = raster.open(xsize, ysize, 5,
+    gdal::GDALError err = raster.open(xsize, ysize, 10,
         Dimension::Type::Float, -9999, pdal::StringList());
 
     if (err != gdal::GDALError::None)
         throwError(raster.errorMsg());
     {
-        raster.writeBand(m_field.xdata(), -9999.0, 1, "X");
-        raster.writeBand(m_field.ydata(), -9999.0, 2, "Y");
-        raster.writeBand(m_field.zdata(), -9999.0, 3, "Z");
-        raster.writeBand(m_field.bdata(), -9999.0, 4, "BEFORE");
-        raster.writeBand(m_field.adata(), -9999.0, 5, "AFTER");
+        raster.writeBand(m_field.xdata(),            -9999.0, 1,  "X");
+        raster.writeBand(m_field.ydata(),            -9999.0, 2,  "Y");
+        raster.writeBand(m_field.zdata(),            -9999.0, 3,  "Z");
+        raster.writeBand(m_field.bdata(),            -9999.0, 4,  "BEFORE");
+        raster.writeBand(m_field.adata(),            -9999.0, 5,  "AFTER");
+        raster.writeBand(m_field.medianXdata(),      -9999.0, 6,  "MEDIAN_X");
+        raster.writeBand(m_field.medianYdata(),      -9999.0, 7,  "MEDIAN_Y");
+        raster.writeBand(m_field.medianZdata(),      -9999.0, 8,  "MEDIAN_Z");
+        raster.writeBand(m_field.matchCountData(),   -9999.0, 9,  "MATCH_COUNT");
+        raster.writeBand(m_field.rmsResidualData(),  -9999.0, 10, "RMS_RESIDUAL");
     }
 }
 
@@ -635,6 +716,81 @@ void Atlas::read(const std::string& filename)
         std::cout << "x/y/vx/vy/total " <<
             x << "/" << y << "/" << vx << "/" << vy << "/" << std::sqrt(vx * vx + vy * vy) << "!\n";
     }
+}
+
+void Atlas::recordShapes(GridPtr& g, bool isBefore, Coord tile, Point origin,
+    const std::vector<ShapePair>& matches)
+{
+    for (const Shape& s : g->shapes())
+    {
+        bool matched = false;
+        size_t matchId = std::numeric_limits<size_t>::max();
+        for (const ShapePair& sp : matches)
+        {
+            const Shape* check   = isBefore ? sp.first  : sp.second;
+            const Shape* partner = isBefore ? sp.second : sp.first;
+            if (check == &s)
+            {
+                matched = true;
+                matchId = partner->id();
+                break;
+            }
+        }
+        m_shapeRecords.push_back({s.indices(), origin, isBefore, tile, s.id(), matched, matchId});
+    }
+}
+
+
+void Atlas::writeShapeGeoJSON(const std::string& filename)
+{
+    std::ofstream out(filename);
+    out << std::fixed << std::setprecision(2);
+    out << "{\"type\":\"FeatureCollection\","
+           "\"crs\":{\"type\":\"name\",\"properties\":{\"name\":\"EPSG:32624\"}},"
+           "\"features\":[\n";
+
+    bool firstFeature = true;
+    for (const ShapeRecord& rec : m_shapeRecords)
+    {
+        if (!firstFeature) out << ",\n";
+        firstFeature = false;
+
+        out << "{\"type\":\"Feature\",\"geometry\":"
+               "{\"type\":\"MultiPolygon\",\"coordinates\":[";
+        bool firstCell = true;
+        for (const GridIndex& gi : rec.indices)
+        {
+            if (!firstCell) out << ",";
+            firstCell = false;
+            double minx = rec.origin.x + gi.x() * m_gridLen;
+            double miny = rec.origin.y + gi.y() * m_gridLen;
+            double maxx = minx + m_gridLen;
+            double maxy = miny + m_gridLen;
+            out << "[["
+                << "[" << minx << "," << miny << "],"
+                << "[" << maxx << "," << miny << "],"
+                << "[" << maxx << "," << maxy << "],"
+                << "[" << minx << "," << maxy << "],"
+                << "[" << minx << "," << miny << "]"
+                << "]]";
+        }
+        // Flip tile_j from internal Y-down to Y-up so it aligns with the
+        // map orientation in QGIS (large tile_j = north).
+        int tileJ = YCellCount - rec.tile.second - 1;
+        out << "]},\"properties\":{"
+            << "\"scan\":\"" << (rec.isBefore ? "before" : "after") << "\","
+            << "\"tile_i\":" << rec.tile.first << ","
+            << "\"tile_j\":" << tileJ << ","
+            << "\"shape_id\":" << rec.id << ","
+            << "\"size\":" << rec.indices.size() << ","
+            << "\"matched\":" << (rec.matched ? "true" : "false") << ",";
+        if (rec.matched)
+            out << "\"match_id\":" << rec.matchId;
+        else
+            out << "\"match_id\":null";
+        out << "}}";
+    }
+    out << "\n]}\n";
 }
 
 } // namespace

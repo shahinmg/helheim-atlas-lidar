@@ -20,7 +20,9 @@ class Field
 public:
     Field(size_t width, size_t height) : m_width(width), m_height(height),
         m_x(width * height), m_y(width * height), m_z(width * height),
+        m_medianX(width * height), m_medianY(width * height), m_medianZ(width * height),
         m_before(width * height), m_after(width * height), m_valid(width * height),
+        m_matchCount(width * height), m_rmsResidual(width * height),
         m_maxLen2(std::numeric_limits<double>::lowest())
     {}
 
@@ -33,11 +35,26 @@ public:
     const float *zdata() const
     { return m_z.data(); }
 
+    const float *medianXdata() const
+    { return m_medianX.data(); }
+
+    const float *medianYdata() const
+    { return m_medianY.data(); }
+
+    const float *medianZdata() const
+    { return m_medianZ.data(); }
+
     const float *bdata() const
     { return m_before.data(); }
 
     const float *adata() const
     { return m_after.data(); }
+
+    const float *matchCountData() const
+    { return m_matchCount.data(); }
+
+    const float *rmsResidualData() const
+    { return m_rmsResidual.data(); }
 
     size_t width() const
     { return m_width; }
@@ -50,7 +67,7 @@ public:
 
     void setOffset(Coord c, Point displacement)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -62,9 +79,30 @@ public:
         m_valid[idx] = true;
     }
 
+    void setMatchQuality(Coord c, int count, float rms)
+    {
+        int idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_matchCount[idx] = static_cast<float>(count);
+        m_rmsResidual[idx] = rms;
+    }
+
+    void setMedianOffset(Coord c, Point displacement)
+    {
+        int idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_medianX[idx] = displacement.x;
+        m_medianY[idx] = displacement.y;
+        m_medianZ[idx] = displacement.z;
+    }
+
     void setBeforeCount(Coord c, float count)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -73,7 +111,7 @@ public:
 
     void setAfterCount(Coord c, float count)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return;
 
@@ -82,7 +120,7 @@ public:
 
     Point offset(Coord c)
     {
-        size_t idx = pos(c);
+        int idx = pos(c);
         if (idx < 0)
             return Point();
         return Point(m_x[idx], m_y[idx], m_z[idx]);
@@ -91,7 +129,10 @@ public:
     bool valid(Coord c)
     { return pos(c) >= 0; }
 
-    std::pair<bool, Point> initialOffset(Coord c)
+    // Returns {valid, estimated_offset, rms_spread_of_neighbors}.
+    // Spread is the weighted RMS deviation of neighbor offsets from the mean;
+    // used to set an adaptive match threshold in matchShapes.
+    std::tuple<bool, Point, double> initialOffset(Coord c)
     {
         const double Sqrt2Recip = 0.70710678118;
         double x = 0;
@@ -113,7 +154,7 @@ public:
         if (idx >= 0)
         {
             if (m_valid[idx])
-                return { true, { m_x[idx], m_y[idx] } };
+                return { true, { m_x[idx], m_y[idx] }, 0.0 };
 
             // We weight each full neighbor equally and each corner neighbor
             // by 1/sqrt(2)
@@ -129,10 +170,33 @@ public:
             {
                 x /= sum;
                 y /= sum;
-                return { true, { x, y } };
+
+                // Weighted RMS deviation of neighbors from the computed mean.
+                double variance = 0;
+                auto addVariance = [&](Coord nc, double rel)
+                {
+                    int nidx = pos(nc);
+                    if (nidx >= 0 && m_valid[nidx])
+                    {
+                        double dx = m_x[nidx] - x;
+                        double dy = m_y[nidx] - y;
+                        variance += rel * (dx * dx + dy * dy);
+                    }
+                };
+                addVariance(Coord(c.first + 1, c.second), 1);
+                addVariance(Coord(c.first - 1, c.second), 1);
+                addVariance(Coord(c.first, c.second + 1), 1);
+                addVariance(Coord(c.first, c.second - 1), 1);
+                addVariance(Coord(c.first + 1, c.second + 1), Sqrt2Recip);
+                addVariance(Coord(c.first - 1, c.second + 1), Sqrt2Recip);
+                addVariance(Coord(c.first + 1, c.second - 1), Sqrt2Recip);
+                addVariance(Coord(c.first - 1, c.second - 1), Sqrt2Recip);
+                double spread = std::sqrt(variance / sum);
+
+                return { true, { x, y }, spread };
             }
         }
-        return { false, { 0, 0 } };
+        return { false, { 0, 0 }, 3.0 };
     }
 
 private:
@@ -143,8 +207,13 @@ private:
     std::vector<float> m_x;
     std::vector<float> m_y;
     std::vector<float> m_z;
+    std::vector<float> m_medianX;
+    std::vector<float> m_medianY;
+    std::vector<float> m_medianZ;
     std::vector<float> m_before;
     std::vector<float> m_after;
+    std::vector<float> m_matchCount;
+    std::vector<float> m_rmsResidual;
     std::vector<bool> m_valid;
     double m_maxLen2;
 

@@ -84,7 +84,7 @@ public:
 private:
     GridCell m_emptyCell;
     pdal::PointViewPtr m_view;
-    int m_len;
+    double m_len;
     Point m_origin;
     std::unordered_map<GridIndex, GridCell> m_cells;
     std::vector<Shape> m_shapes;

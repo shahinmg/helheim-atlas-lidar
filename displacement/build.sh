@@ -6,5 +6,6 @@ mkdir build
 cd build
 cmake -G Ninja ..  \
     -DCMAKE_BUILD_TYPE=Release  \
-    -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX
+    -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX \
+    -DCMAKE_CXX_COMPILER=$CXX
 ninja
