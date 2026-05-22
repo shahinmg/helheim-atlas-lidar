@@ -83,7 +83,8 @@ void Atlas::addArgs()
     m_args.add("yshift", "Y distance shift", m_shift.y).setPositional();
     m_args.add("dumpxy", "XY pos in UTM meters to dump", m_dumpxy, Point(-1000, -1000));
     m_args.add("dumpij", "IJ pos in grid index to dump", m_dumpij, Coord(-1000, -1000));
-    m_args.add("dumpfrac", "Top Fraction to be used for dump", m_dumpfrac, .1);
+    m_args.add("topfrac", "Top fraction of points by Z used for surface slice (default 0.5)",
+        m_dumpfrac, 0.5);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -103,9 +104,8 @@ void Atlas::parse(const pdal::StringList& slist)
     }
     if (m_dumpxy != Point(-1000, -1000) && m_dumpij != Coord(-1000, -1000))
         fatal("Can't specifify both 'dumpxy' and 'dumpij'.");
-    if (m_dumpfrac < 0 || m_dumpfrac > 1)
-        fatal("'dumpfrac' must be a value in the range (0,1].");
-    m_dumpfrac = 1 - m_dumpfrac;
+    if (m_dumpfrac <= 0 || m_dumpfrac > 1)
+        fatal("'topfrac' must be a value in the range (0,1].");
 }
 
 void Atlas::run(const pdal::StringList& s)
@@ -297,7 +297,12 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "Before");
 
-    PointViewPtr slice = hist[hist.size() - 1];
+    std::sort(v->begin(), v->end(),
+        [](const PointRef& a, const PointRef& b)
+            { return a.compare(Dimension::Id::Z, b); });
+    PointViewPtr slice = v->makeNew();
+    for (PointId i = (PointId)(v->size() * (1.0 - m_dumpfrac)); i < v->size(); ++i)
+        slice->appendPoint(*v, i);
     if (slice->empty())
         return false;
 
@@ -306,8 +311,6 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     // negative grid indices and flood-fill can cross the tile boundary.
     BOX2D box = splitter->bounds(splitterCoord(coord));
     Point bgOrigin { box.minx - m_overlap, box.miny - m_overlap };
-    if (coord == m_dumpij)
-        slice = debugView;
     GridPtr bg = buildGrid(slice, bgOrigin);
     bg->findShapes(2);
 
@@ -341,7 +344,12 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
             break;
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "After");
-    slice = hist[hist.size() - 1];
+    std::sort(v->begin(), v->end(),
+        [](const PointRef& a, const PointRef& b)
+            { return a.compare(Dimension::Id::Z, b); });
+    slice = v->makeNew();
+    for (PointId i = (PointId)(v->size() * (1.0 - m_dumpfrac)); i < v->size(); ++i)
+        slice->appendPoint(*v, i);
     if (slice->empty())
         return false;
 
@@ -354,8 +362,6 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     BOX2D afterCore { box.minx + offset.x, box.miny + offset.y,
                       box.maxx + offset.x, box.maxy + offset.y };
     Point agOrigin { box.minx + offset.x - m_overlap, box.miny + offset.y - m_overlap };
-    if (coord == m_dumpij)
-        slice = debugView;
     GridPtr ag = buildGrid(slice, agOrigin);
     ag->findShapes(2);
 
@@ -365,10 +371,16 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
             [&](const Shape& s){ return !inCoreBox(s, agOrigin, afterCore); }),
         agShapes.end());
 
-
-
     sortShapes(bg);
     sortShapes(ag);
+
+    if (m_dumpij == coord)
+    {
+        bg->draw(0, 0, 49, 49, false);
+        ag->draw(0, 0, 49, 49, false);
+        bg->draw(0, 0, 49, 49, true);
+        ag->draw(0, 0, 49, 49, true);
+    }
 
     std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
     recordShapes(bg, true,  coord, bgOrigin, shapes);
@@ -379,24 +391,6 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     offset = mean;
     m_field.setMedianOffset(coord, median);
     m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
-
-
-
-    if (m_dumpij == coord)
-    {
-        /**
-        dumpShapes(bg);
-        dumpShapes(ag);
-        **/
-
-        // Draw with point counts.
-        bg->draw(0, 0, 49, 49, false);
-        ag->draw(0, 0, 49, 49, false);
-
-        // Draw with shape numbers.
-        bg->draw(0, 0, 49, 49, true);
-        ag->draw(0, 0, 49, 49, true);
-    }
 
     return true;
 }
@@ -423,7 +417,7 @@ void Atlas::dumpShapes(GridPtr& g)
 std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread)
 {
     std::vector<ShapePair> matches;
-    double threshold = std::clamp(spread, 1.0, 3.0);
+    double threshold = std::clamp(spread, 2.5, 4.0);
 
     // Build a list of shape pointers
     std::list<Shape *> asp;
@@ -548,7 +542,7 @@ Histogram Atlas::histogram(pdal::PointViewPtr v, pdal::Dimension::Id dim,
             idx = 9;
         splits[idx]->appendPoint(*v, id);
 
-        if (debugView && (val - mn) / (mx - mn) > m_dumpfrac)
+        if (debugView && (val - mn) / (mx - mn) > (1.0 - m_dumpfrac))
             debugView->appendPoint(*v, id);
     }
 
