@@ -86,7 +86,7 @@ void Atlas::addArgs()
     m_args.add("topfrac", "Top fraction of points by Z used for surface slice (default 0.5)",
         m_dumpfrac, 0.5);
     m_args.add("minshape", "Minimum shape size in grid cells; smaller shapes are dropped "
-        "before matching (default 3)", m_minShape, 3);
+        "before matching (default 2)", m_minShape, 2);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -479,7 +479,7 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double sprea
 std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
-    std::vector<double> pairX, pairY, pairZ, weights;
+    std::vector<double> pairX, pairY, pairZ;
 
     for (const ShapePair& sp : shapes)
     {
@@ -496,15 +496,6 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
                          (aExtent.miny - bExtent.miny) +
                          (aExtent.maxy - bExtent.maxy)) / 3.0);
         pairZ.push_back(aCenter.z - bCenter.z);
-
-        // Weight by shape size (larger = more stable centroid) and inverse
-        // centroid distance (tighter match = more confident displacement).
-        // +1m epsilon keeps weight finite for near-perfect matches.
-        double dist = std::sqrt(std::pow(aCenter.x - bCenter.x, 2) +
-                                std::pow(aCenter.y - bCenter.y, 2));
-        double sizeW = static_cast<double>(std::min(sp.first->size(), sp.second->size()));
-        double distW = 1.0 / (dist + 1.0);
-        weights.push_back(sizeW * distW);
     }
 
     auto calcMedian = [](std::vector<double> v) -> double {
@@ -513,17 +504,12 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
         return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
     };
 
-    double totalW = std::accumulate(weights.begin(), weights.end(), 0.0);
-    double sumX = 0, sumY = 0, sumZ = 0;
+    double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
+    double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
+    double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
     size_t n = shapes.size();
-    for (size_t i = 0; i < n; ++i)
-    {
-        sumX += weights[i] * pairX[i];
-        sumY += weights[i] * pairY[i];
-        sumZ += weights[i] * pairZ[i];
-    }
 
-    Point mean { sumX / totalW, sumY / totalW, sumZ / totalW };
+    Point mean { sumX / n, sumY / n, sumZ / n };
     Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
 
     double rmsResidual = 0;
@@ -531,9 +517,9 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
     {
         double dx = pairX[i] - mean.x;
         double dy = pairY[i] - mean.y;
-        rmsResidual += weights[i] * (dx * dx + dy * dy);
+        rmsResidual += dx * dx + dy * dy;
     }
-    rmsResidual = std::sqrt(rmsResidual / totalW);
+    rmsResidual = std::sqrt(rmsResidual / n);
 
     return { mean, median, rmsResidual };
 }
