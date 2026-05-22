@@ -82,6 +82,7 @@ private:
     Coord m_dumpij;
     Point m_dumpxy;
     double m_dumpfrac;
+    int m_minShape;
 
     pdal::PipelineManager m_beforeMgr;
     pdal::PipelineManager m_afterMgr;

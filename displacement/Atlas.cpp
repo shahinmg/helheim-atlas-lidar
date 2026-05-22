@@ -85,6 +85,8 @@ void Atlas::addArgs()
     m_args.add("dumpij", "IJ pos in grid index to dump", m_dumpij, Coord(-1000, -1000));
     m_args.add("topfrac", "Top fraction of points by Z used for surface slice (default 0.5)",
         m_dumpfrac, 0.5);
+    m_args.add("minshape", "Minimum shape size in grid cells; smaller shapes are dropped "
+        "before matching (default 3)", m_minShape, 3);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -106,6 +108,8 @@ void Atlas::parse(const pdal::StringList& slist)
         fatal("Can't specifify both 'dumpxy' and 'dumpij'.");
     if (m_dumpfrac <= 0 || m_dumpfrac > 1)
         fatal("'topfrac' must be a value in the range (0,1].");
+    if (m_minShape < 1)
+        fatal("'minshape' must be >= 1.");
 }
 
 void Atlas::run(const pdal::StringList& s)
@@ -327,7 +331,10 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     auto& bgShapes = bg->shapes();
     bgShapes.erase(
         std::remove_if(bgShapes.begin(), bgShapes.end(),
-            [&](const Shape& s){ return !inCoreBox(s, bgOrigin, box); }),
+            [&](const Shape& s){
+                return !inCoreBox(s, bgOrigin, box) ||
+                       s.size() < (size_t)m_minShape;
+            }),
         bgShapes.end());
 
     splitter = dynamic_cast<SplitterFilter *>(m_afterMgr.getStage());
@@ -368,7 +375,10 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     auto& agShapes = ag->shapes();
     agShapes.erase(
         std::remove_if(agShapes.begin(), agShapes.end(),
-            [&](const Shape& s){ return !inCoreBox(s, agOrigin, afterCore); }),
+            [&](const Shape& s){
+                return !inCoreBox(s, agOrigin, afterCore) ||
+                       s.size() < (size_t)m_minShape;
+            }),
         agShapes.end());
 
     sortShapes(bg);
@@ -469,7 +479,7 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double sprea
 std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
-    std::vector<double> pairX, pairY, pairZ;
+    std::vector<double> pairX, pairY, pairZ, weights;
 
     for (const ShapePair& sp : shapes)
     {
@@ -486,6 +496,15 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
                          (aExtent.miny - bExtent.miny) +
                          (aExtent.maxy - bExtent.maxy)) / 3.0);
         pairZ.push_back(aCenter.z - bCenter.z);
+
+        // Weight by shape size (larger = more stable centroid) and inverse
+        // centroid distance (tighter match = more confident displacement).
+        // +1m epsilon keeps weight finite for near-perfect matches.
+        double dist = std::sqrt(std::pow(aCenter.x - bCenter.x, 2) +
+                                std::pow(aCenter.y - bCenter.y, 2));
+        double sizeW = static_cast<double>(std::min(sp.first->size(), sp.second->size()));
+        double distW = 1.0 / (dist + 1.0);
+        weights.push_back(sizeW * distW);
     }
 
     auto calcMedian = [](std::vector<double> v) -> double {
@@ -494,12 +513,17 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
         return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
     };
 
-    double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
-    double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
-    double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
+    double totalW = std::accumulate(weights.begin(), weights.end(), 0.0);
+    double sumX = 0, sumY = 0, sumZ = 0;
     size_t n = shapes.size();
+    for (size_t i = 0; i < n; ++i)
+    {
+        sumX += weights[i] * pairX[i];
+        sumY += weights[i] * pairY[i];
+        sumZ += weights[i] * pairZ[i];
+    }
 
-    Point mean { sumX / n, sumY / n, sumZ / n };
+    Point mean { sumX / totalW, sumY / totalW, sumZ / totalW };
     Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
 
     double rmsResidual = 0;
@@ -507,9 +531,9 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
     {
         double dx = pairX[i] - mean.x;
         double dy = pairY[i] - mean.y;
-        rmsResidual += dx * dx + dy * dy;
+        rmsResidual += weights[i] * (dx * dx + dy * dy);
     }
-    rmsResidual = std::sqrt(rmsResidual / n);
+    rmsResidual = std::sqrt(rmsResidual / totalW);
 
     return { mean, median, rmsResidual };
 }
