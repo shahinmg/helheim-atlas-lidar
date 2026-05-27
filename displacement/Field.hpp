@@ -19,10 +19,12 @@ class Field
 {
 public:
     Field(size_t width, size_t height) : m_width(width), m_height(height),
-        m_x(width * height), m_y(width * height), m_z(width * height),
-        m_medianX(width * height), m_medianY(width * height), m_medianZ(width * height),
-        m_before(width * height), m_after(width * height), m_valid(width * height),
-        m_matchCount(width * height), m_rmsResidual(width * height),
+        m_x(width * height, -9999.f), m_y(width * height, -9999.f), m_z(width * height, -9999.f),
+        m_medianX(width * height, -9999.f), m_medianY(width * height, -9999.f),
+        m_medianZ(width * height, -9999.f),
+        m_before(width * height, -9999.f), m_after(width * height, -9999.f),
+        m_valid(width * height),
+        m_matchCount(width * height, -9999.f), m_rmsResidual(width * height, -9999.f),
         m_maxLen2(std::numeric_limits<double>::lowest())
     {}
 

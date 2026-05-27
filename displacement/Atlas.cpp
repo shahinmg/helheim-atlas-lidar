@@ -646,7 +646,12 @@ void Atlas::writeSvg(const std::string& filename, const pdal::BOX2D& extent)
 
     for (size_t ypos = 0; ypos < m_field.height(); ++ypos)
         for (size_t xpos = 0; xpos < m_field.width(); ++xpos)
-            d.doVector({xpos, ypos}, {*xp++, *yp++});
+        {
+            float x = *xp++;
+            float y = *yp++;
+            if (x != -9999.f)
+                d.doVector({xpos, ypos}, {x, y});
+        }
 }
 
 
