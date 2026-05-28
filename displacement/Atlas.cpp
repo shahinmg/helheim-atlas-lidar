@@ -18,6 +18,8 @@
 #include <math.h>
 #include <numeric>
 
+#include <gdal_priv.h>
+
 #include <pdal/private/gdal/GDALUtils.hpp>
 #include <pdal/private/gdal/Raster.hpp>
 #include <pdal/private/MathUtils.hpp>
@@ -125,8 +127,14 @@ void Atlas::run(const pdal::StringList& s)
         load();
         processGrid();
         namespace fs = std::filesystem;
-        std::string stem = pdal::FileUtils::stem(m_beforeFilename) + "_" +
-            pdal::FileUtils::stem(m_afterFilename);
+        auto stripCopc = [](std::string s) -> std::string {
+            auto pos = s.rfind(".copc");
+            if (pos != std::string::npos)
+                s.erase(pos, 5);
+            return s;
+        };
+        std::string stem = stripCopc(pdal::FileUtils::stem(m_beforeFilename)) + "_" +
+            stripCopc(pdal::FileUtils::stem(m_afterFilename));
 
         if (!m_geojsonDir.empty())
         {
@@ -670,14 +678,18 @@ void Atlas::writeTiff(const std::string& filename)
     pixelToPos[4] = 0;
     pixelToPos[5] = -m_len;
 
-    gdal::registerDrivers();
-    gdal::Raster raster(filename, "GTiff", "EPSG:32624", pixelToPos);
-    gdal::GDALError err = raster.open(xsize, ysize, 10,
-        Dimension::Type::Float, -9999, pdal::StringList());
+    pdal::gdal::registerDrivers();
 
-    if (err != gdal::GDALError::None)
-        throwError(raster.errorMsg());
+    // Write to in-memory GTiff, then copy to COG so the output is cloud-optimized.
+    std::string memPath = "/vsimem/atlas_temp.tif";
     {
+        pdal::gdal::Raster raster(memPath, "GTiff", "EPSG:32624", pixelToPos);
+        pdal::gdal::GDALError err = raster.open(xsize, ysize, 10,
+            Dimension::Type::Float, -9999, pdal::StringList());
+
+        if (err != pdal::gdal::GDALError::None)
+            throwError(raster.errorMsg());
+
         raster.writeBand(m_field.xdata(),            -9999.0, 1,  "X");
         raster.writeBand(m_field.ydata(),            -9999.0, 2,  "Y");
         raster.writeBand(m_field.zdata(),            -9999.0, 3,  "Z");
@@ -689,6 +701,15 @@ void Atlas::writeTiff(const std::string& filename)
         raster.writeBand(m_field.matchCountData(),   -9999.0, 9,  "MATCH_COUNT");
         raster.writeBand(m_field.rmsResidualData(),  -9999.0, 10, "RMS_RESIDUAL");
     }
+
+    GDALDataset* srcDs = static_cast<GDALDataset*>(GDALOpen(memPath.c_str(), GA_ReadOnly));
+    GDALDriver* cogDriver = GetGDALDriverManager()->GetDriverByName("COG");
+    const char* cogOptions[] = { "COMPRESS=DEFLATE", nullptr };
+    GDALDataset* cogDs = cogDriver->CreateCopy(
+        filename.c_str(), srcDs, FALSE, const_cast<char**>(cogOptions), nullptr, nullptr);
+    GDALClose(cogDs);
+    GDALClose(srcDs);
+    VSIUnlink(memPath.c_str());
 }
 
 
