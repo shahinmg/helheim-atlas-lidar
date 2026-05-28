@@ -2,3 +2,8 @@ CLAUDE.md
 shape_geoms/
 velocities/
 vel_pys/
+*.tif
+*.aux.xml
+.vscode/
+displacement/build/
+velocities_debug/
