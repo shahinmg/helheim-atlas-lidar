@@ -6,3 +6,4 @@ vel_pys/
 *.aux.xml
 .vscode/
 displacement/build/
+velocities_debug/
