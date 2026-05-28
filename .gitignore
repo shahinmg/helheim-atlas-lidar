@@ -7,3 +7,4 @@ vel_pys/
 .vscode/
 displacement/build/
 velocities_debug/
+output/
