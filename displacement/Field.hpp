@@ -22,6 +22,8 @@ public:
         m_x(width * height, -9999.f), m_y(width * height, -9999.f), m_z(width * height, -9999.f),
         m_medianX(width * height, -9999.f), m_medianY(width * height, -9999.f),
         m_medianZ(width * height, -9999.f),
+        m_madX(width * height, -9999.f), m_madY(width * height, -9999.f),
+        m_madZ(width * height, -9999.f),
         m_before(width * height, -9999.f), m_after(width * height, -9999.f),
         m_valid(width * height),
         m_matchCount(width * height, -9999.f), m_rmsResidual(width * height, -9999.f),
@@ -45,6 +47,15 @@ public:
 
     const float *medianZdata() const
     { return m_medianZ.data(); }
+
+    const float *madXdata() const
+    { return m_madX.data(); }
+
+    const float *madYdata() const
+    { return m_madY.data(); }
+
+    const float *madZdata() const
+    { return m_madZ.data(); }
 
     const float *bdata() const
     { return m_before.data(); }
@@ -100,6 +111,17 @@ public:
         m_medianX[idx] = displacement.x;
         m_medianY[idx] = displacement.y;
         m_medianZ[idx] = displacement.z;
+    }
+
+    void setMadOffset(Coord c, Point mad)
+    {
+        int idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_madX[idx] = mad.x;
+        m_madY[idx] = mad.y;
+        m_madZ[idx] = mad.z;
     }
 
     void setBeforeCount(Coord c, float count)
@@ -212,6 +234,9 @@ private:
     std::vector<float> m_medianX;
     std::vector<float> m_medianY;
     std::vector<float> m_medianZ;
+    std::vector<float> m_madX;
+    std::vector<float> m_madY;
+    std::vector<float> m_madZ;
     std::vector<float> m_before;
     std::vector<float> m_after;
     std::vector<float> m_matchCount;
