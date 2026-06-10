@@ -408,9 +408,10 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     recordShapes(ag, false, coord, agOrigin, shapes);
     if (shapes.empty())
         return false;
-    auto [mean, median, rmsResidual] = calculateOffset(bg, ag, shapes);
+    auto [mean, median, rmsResidual, mad] = calculateOffset(bg, ag, shapes);
     offset = mean;
     m_field.setMedianOffset(coord, median);
+    m_field.setMadOffset(coord, mad);
     m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
 
     return true;
@@ -487,7 +488,7 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double sprea
 }
 
 
-std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
+std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
     std::vector<double> pairX, pairY, pairZ;
@@ -515,6 +516,13 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
         return (n % 2) ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2.0;
     };
 
+    auto calcMAD = [&calcMedian](const std::vector<double>& v, double med) -> double {
+        std::vector<double> absdev(v.size());
+        for (size_t i = 0; i < v.size(); ++i)
+            absdev[i] = std::abs(v[i] - med);
+        return calcMedian(absdev);
+    };
+
     double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
     double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
     double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
@@ -522,6 +530,7 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
 
     Point mean { sumX / n, sumY / n, sumZ / n };
     Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
+    Point mad { calcMAD(pairX, median.x), calcMAD(pairY, median.y), calcMAD(pairZ, median.z) };
 
     double rmsResidual = 0;
     for (size_t i = 0; i < n; ++i)
@@ -532,7 +541,7 @@ std::tuple<Point, Point, double> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag
     }
     rmsResidual = std::sqrt(rmsResidual / n);
 
-    return { mean, median, rmsResidual };
+    return { mean, median, rmsResidual, mad };
 }
 
 
@@ -684,7 +693,7 @@ void Atlas::writeTiff(const std::string& filename)
     std::string memPath = "/vsimem/atlas_temp.tif";
     {
         pdal::gdal::Raster raster(memPath, "GTiff", "EPSG:32624", pixelToPos);
-        pdal::gdal::GDALError err = raster.open(xsize, ysize, 10,
+        pdal::gdal::GDALError err = raster.open(xsize, ysize, 13,
             Dimension::Type::Float, -9999, pdal::StringList());
 
         if (err != pdal::gdal::GDALError::None)
@@ -700,6 +709,9 @@ void Atlas::writeTiff(const std::string& filename)
         raster.writeBand(m_field.medianZdata(),      -9999.0, 8,  "MEDIAN_Z");
         raster.writeBand(m_field.matchCountData(),   -9999.0, 9,  "MATCH_COUNT");
         raster.writeBand(m_field.rmsResidualData(),  -9999.0, 10, "RMS_RESIDUAL");
+        raster.writeBand(m_field.madXdata(),         -9999.0, 11, "MAD_X");
+        raster.writeBand(m_field.madYdata(),         -9999.0, 12, "MAD_Y");
+        raster.writeBand(m_field.madZdata(),         -9999.0, 13, "MAD_Z");
     }
 
     GDALDataset* srcDs = static_cast<GDALDataset*>(GDALOpen(memPath.c_str(), GA_ReadOnly));
