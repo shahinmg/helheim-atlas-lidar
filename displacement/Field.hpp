@@ -27,6 +27,7 @@ public:
         m_before(width * height, -9999.f), m_after(width * height, -9999.f),
         m_valid(width * height),
         m_matchCount(width * height, -9999.f), m_rmsResidual(width * height, -9999.f),
+        m_rejected(width * height, -9999.f),
         m_maxLen2(std::numeric_limits<double>::lowest())
     {}
 
@@ -69,6 +70,9 @@ public:
     const float *rmsResidualData() const
     { return m_rmsResidual.data(); }
 
+    const float *rejectedData() const
+    { return m_rejected.data(); }
+
     size_t width() const
     { return m_width; }
 
@@ -100,6 +104,15 @@ public:
 
         m_matchCount[idx] = static_cast<float>(count);
         m_rmsResidual[idx] = rms;
+    }
+
+    void setRejected(Coord c, int count)
+    {
+        int idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_rejected[idx] = static_cast<float>(count);
     }
 
     void setMedianOffset(Coord c, Point displacement)
@@ -156,7 +169,9 @@ public:
     // Returns {valid, estimated_offset, rms_spread_of_neighbors}.
     // Spread is the weighted RMS deviation of neighbor offsets from the mean;
     // used to set an adaptive match threshold in matchShapes.
-    std::tuple<bool, Point, double> initialOffset(Coord c)
+    // With neighborsOnly, the cell's own value is ignored and the estimate
+    // always comes from the neighbor average (used by the second grid pass).
+    std::tuple<bool, Point, double> initialOffset(Coord c, bool neighborsOnly = false)
     {
         const double Sqrt2Recip = 0.70710678118;
         double x = 0;
@@ -177,7 +192,7 @@ public:
         int idx = pos(c);
         if (idx >= 0)
         {
-            if (m_valid[idx])
+            if (m_valid[idx] && !neighborsOnly)
                 return { true, { m_x[idx], m_y[idx] }, 0.0 };
 
             // We weight each full neighbor equally and each corner neighbor
@@ -241,6 +256,7 @@ private:
     std::vector<float> m_after;
     std::vector<float> m_matchCount;
     std::vector<float> m_rmsResidual;
+    std::vector<float> m_rejected;
     std::vector<bool> m_valid;
     double m_maxLen2;
 

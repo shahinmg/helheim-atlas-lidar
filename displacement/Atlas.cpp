@@ -89,6 +89,10 @@ void Atlas::addArgs()
         m_dumpfrac, 0.5);
     m_args.add("minshape", "Minimum shape size in grid cells; smaller shapes are dropped "
         "before matching (default 1, disables filter)", m_minShape, 1);
+    m_args.add("minmatch", "Minimum matched shape pairs (after outlier rejection) "
+        "required to accept a cell (default 3)", m_minMatch, 3);
+    m_args.add("passes", "Number of grid passes; passes after the first reprocess "
+        "every cell seeded from its converged neighborhood (default 1)", m_passes, 1);
     m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
         "(default 1.0)", m_gridLen, 1.0);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
@@ -114,6 +118,10 @@ void Atlas::parse(const pdal::StringList& slist)
         fatal("'topfrac' must be a value in the range (0,1].");
     if (m_minShape < 1)
         fatal("'minshape' must be >= 1.");
+    if (m_minMatch < 1)
+        fatal("'minmatch' must be >= 1.");
+    if (m_passes < 1)
+        fatal("'passes' must be >= 1.");
     if (m_gridLen <= 0)
         fatal("'gridlen' must be > 0.");
 }
@@ -224,40 +232,62 @@ void Atlas::processGrid()
     int maxRadius = std::max({start.first, start.second,
         XCellCount - start.first - 1, YCellCount - start.second - 1});
 
-    for (int i = 0; i <= maxRadius; ++i)
+    // The first pass solves the field spiraling out from the center, seeding
+    // each cell from already-solved neighbors. Optional extra passes
+    // (--passes) reprocess every cell seeded from its full converged
+    // neighborhood, which removes the one-sided frontier bias of the spiral
+    // order and gives failed cells another chance — at the cost of a full
+    // grid traversal each.
+    for (int pass = 0; pass < m_passes; ++pass)
     {
-        int y = -i;
-        int x = -i;
-        while (true)
+        // Shape records from earlier passes are superseded.
+        if (pass > 0)
+            m_shapeRecords.clear();
+
+        for (int i = 0; i <= maxRadius; ++i)
         {
-            Coord c{start.first + x, start.second + y};
-            m_coord = c;
-
-            // If this cell has an initial offset, use it, otherwise use
-            // the base one.
-            auto [valid, pos, spread] = m_field.initialOffset(c);
-            if (!valid)
+            int y = -i;
+            int x = -i;
+            while (true)
             {
-                pos = m_shift;
-                spread = 3.0;
+                Coord c{start.first + x, start.second + y};
+                m_coord = c;
+
+                // If this cell has an initial offset, use it, otherwise use
+                // the base one. On later passes, seed from the neighbor
+                // average even when the cell itself was solved.
+                auto [valid, pos, spread] = m_field.initialOffset(c, pass > 0);
+                if (!valid && pass > 0)
+                {
+                    // No valid neighbors; fall back to the cell's own value.
+                    auto own = m_field.initialOffset(c, false);
+                    valid = std::get<0>(own);
+                    pos = std::get<1>(own);
+                    spread = std::get<2>(own);
+                }
+                if (!valid)
+                {
+                    pos = m_shift;
+                    spread = 3.0;
+                }
+
+                // The offset is updated if processing works.
+                if (process(c, pos, spread))
+                    m_field.setOffset(c, pos);
+
+                // This starts in the lower left corner and goes around in
+                // a "circle".  Once we get back to the beginning, we break.
+                if (y == -i && x != i)
+                    x++;
+                else if (x == i && y != i)
+                    y++;
+                else if (y == i && x != -i)
+                    x--;
+                else if (x == -i && y != -i)
+                    y--;
+                if (x == -i && y == -i)
+                    break;
             }
-
-            // The offset is updated if processing works.
-            if (process(c, pos, spread))
-                m_field.setOffset(c, pos);
-
-            // This starts in the lower left corner and goes around in
-            // a "circle".  Once we get back to the beginning, we break.
-            if (y == -i && x != i)
-                x++;
-            else if (x == i && y != i)
-                y++;
-            else if (y == i && x != -i)
-                x--;
-            else if (x == -i && y != -i)
-                y--;
-            if (x == -i && y == -i)
-                break;
         }
     }
 
@@ -406,13 +436,20 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
     recordShapes(bg, true,  coord, bgOrigin, shapes);
     recordShapes(ag, false, coord, agOrigin, shapes);
-    if (shapes.empty())
+
+    // Cells with too few pairs produce degenerate statistics (a single pair
+    // has zero residual and zero MAD); leave them as NoData rather than
+    // letting them masquerade as high-quality cells.
+    if (shapes.size() < (size_t)m_minMatch)
         return false;
-    auto [mean, median, rmsResidual, mad] = calculateOffset(bg, ag, shapes);
-    offset = mean;
-    m_field.setMedianOffset(coord, median);
-    m_field.setMadOffset(coord, mad);
-    m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
+    OffsetStats stats = calculateOffset(bg, ag, shapes);
+    if (stats.used < (size_t)m_minMatch)
+        return false;
+    offset = stats.mean;
+    m_field.setMedianOffset(coord, stats.median);
+    m_field.setMadOffset(coord, stats.mad);
+    m_field.setMatchQuality(coord, stats.used, stats.rmsResidual);
+    m_field.setRejected(coord, stats.rejected);
 
     return true;
 }
@@ -441,54 +478,51 @@ std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double sprea
     std::vector<ShapePair> matches;
     double threshold = std::clamp(spread, 2.5, 4.0);
 
-    // Build a list of shape pointers
-    std::list<Shape *> asp;
-    for (Shape& s : ag->shapes())
-        asp.push_back(&s);
-
-    int matchCount = 0;
-    for (const Shape& s : bg->shapes())
+    // Find the closest shape in 'candidates' passing the 3:1 size-ratio gate.
+    auto nearest = [](const Shape& s, std::vector<Shape>& candidates)
+        -> std::pair<const Shape *, double>
     {
-        std::list<Shape *>::iterator exactMatch;
-        double minExactDist = (std::numeric_limits<double>::max)();
-        for (auto it = asp.begin(); it != asp.end(); ++it)
+        const Shape *best = nullptr;
+        double minDist = (std::numeric_limits<double>::max)();
+        for (const Shape& ts : candidates)
         {
-            Shape *ts = *it;
-
-            double sizeRatio = (double)s.size() / ts->size();
+            double sizeRatio = (double)s.size() / ts.size();
             if (sizeRatio > 3.0 || sizeRatio < (1.0 / 3.0))
                 continue;
 
-            Point bp = s.exactCenter();
-            Point ap = ts->exactCenter();
-            double exactDist = std::sqrt(std::pow(bp.x - ap.x, 2) + std::pow(bp.y - ap.y, 2));
-            if (exactDist < minExactDist)
+            Point sp = s.exactCenter();
+            Point tp = ts.exactCenter();
+            double dist = std::sqrt(std::pow(sp.x - tp.x, 2) + std::pow(sp.y - tp.y, 2));
+            if (dist < minDist)
             {
-                minExactDist = exactDist;
-                exactMatch = it;
+                minDist = dist;
+                best = &ts;
             }
         }
-        if (minExactDist > threshold)
+        return { best, minDist };
+    };
+
+    // Mutual nearest neighbor: accept a pair only if each shape is the
+    // other's closest candidate. One-to-one by construction and independent
+    // of the order shapes are visited, so a large shape can't claim an
+    // after-shape that better matches a different before-shape.
+    for (const Shape& s : bg->shapes())
+    {
+        auto [after, dist] = nearest(s, ag->shapes());
+        if (!after || dist > threshold)
+            continue;
+        if (nearest(*after, bg->shapes()).first != &s)
             continue;
 
         if (m_dumpij == m_coord)
-            std::cout << "Match: " << s.id() << " = " << (*exactMatch)->id() << "\n";
-        ShapePair sp {&s, *exactMatch};
-        matches.push_back(sp);
-        asp.erase(exactMatch);
-        matchCount++;
-        if (asp.empty())
-            break;
+            std::cout << "Match: " << s.id() << " = " << after->id() << "\n";
+        matches.push_back({&s, after});
     }
-/**
-    std::cerr << "Matched " << matchCount << " of " << bg->shapes().size() <<
-        "!\n\n";
-**/
     return matches;
 }
 
 
-std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
+OffsetStats Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
     const std::vector<ShapePair>& shapes)
 {
     std::vector<double> pairX, pairY, pairZ;
@@ -523,25 +557,58 @@ std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, Grid
         return calcMedian(absdev);
     };
 
-    double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
-    double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
-    double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
-    size_t n = shapes.size();
+    // One robust-rejection pass: drop pairs whose horizontal displacement
+    // deviates from the median by more than 3 sigma-equivalents
+    // (1.4826 * MAD). Wrong matches show up as horizontal outliers and
+    // would otherwise contaminate the mean, which seeds neighboring cells.
+    // A zero MAD (most pairs identical) carries no scale information, so
+    // that axis is skipped.
+    double medX = calcMedian(pairX);
+    double medY = calcMedian(pairY);
+    double madX = calcMAD(pairX, medX);
+    double madY = calcMAD(pairY, medY);
+    const double rejectScale = 3.0 * 1.4826;
 
-    Point mean { sumX / n, sumY / n, sumZ / n };
-    Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
-    Point mad { calcMAD(pairX, median.x), calcMAD(pairY, median.y), calcMAD(pairZ, median.z) };
+    std::vector<double> keptX, keptY, keptZ;
+    for (size_t i = 0; i < pairX.size(); ++i)
+    {
+        if (madX > 0 && std::abs(pairX[i] - medX) > rejectScale * madX)
+            continue;
+        if (madY > 0 && std::abs(pairY[i] - medY) > rejectScale * madY)
+            continue;
+        keptX.push_back(pairX[i]);
+        keptY.push_back(pairY[i]);
+        keptZ.push_back(pairZ[i]);
+    }
+
+    OffsetStats stats;
+    stats.used = keptX.size();
+    stats.rejected = pairX.size() - keptX.size();
+    if (keptX.empty())
+        return stats;
+
+    double sumX = std::accumulate(keptX.begin(), keptX.end(), 0.0);
+    double sumY = std::accumulate(keptY.begin(), keptY.end(), 0.0);
+    double sumZ = std::accumulate(keptZ.begin(), keptZ.end(), 0.0);
+    size_t n = keptX.size();
+
+    stats.mean = { sumX / n, sumY / n, sumZ / n };
+    stats.median = { calcMedian(keptX), calcMedian(keptY), calcMedian(keptZ) };
+    stats.mad = { calcMAD(keptX, stats.median.x), calcMAD(keptY, stats.median.y),
+        calcMAD(keptZ, stats.median.z) };
 
     double rmsResidual = 0;
     for (size_t i = 0; i < n; ++i)
     {
-        double dx = pairX[i] - mean.x;
-        double dy = pairY[i] - mean.y;
+        double dx = keptX[i] - stats.mean.x;
+        double dy = keptY[i] - stats.mean.y;
         rmsResidual += dx * dx + dy * dy;
     }
-    rmsResidual = std::sqrt(rmsResidual / n);
+    // n - 1: the mean was estimated from these same pairs, and counts here
+    // are small enough for the bias to matter.
+    stats.rmsResidual = (n > 1) ? std::sqrt(rmsResidual / (n - 1)) : 0.0;
 
-    return { mean, median, rmsResidual, mad };
+    return stats;
 }
 
 
@@ -693,7 +760,7 @@ void Atlas::writeTiff(const std::string& filename)
     std::string memPath = "/vsimem/atlas_temp.tif";
     {
         pdal::gdal::Raster raster(memPath, "GTiff", "EPSG:32624", pixelToPos);
-        pdal::gdal::GDALError err = raster.open(xsize, ysize, 13,
+        pdal::gdal::GDALError err = raster.open(xsize, ysize, 14,
             Dimension::Type::Float, -9999, pdal::StringList());
 
         if (err != pdal::gdal::GDALError::None)
@@ -712,6 +779,7 @@ void Atlas::writeTiff(const std::string& filename)
         raster.writeBand(m_field.madXdata(),         -9999.0, 11, "MAD_X");
         raster.writeBand(m_field.madYdata(),         -9999.0, 12, "MAD_Y");
         raster.writeBand(m_field.madZdata(),         -9999.0, 13, "MAD_Z");
+        raster.writeBand(m_field.rejectedData(),     -9999.0, 14, "REJECTED");
     }
 
     GDALDataset* srcDs = static_cast<GDALDataset*>(GDALOpen(memPath.c_str(), GA_ReadOnly));

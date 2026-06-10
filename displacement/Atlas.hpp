@@ -20,6 +20,18 @@
 namespace AtlasProcessor
 {
 
+// Per-cell displacement statistics computed from matched shape pairs that
+// survive outlier rejection.
+struct OffsetStats
+{
+    Point mean;
+    Point median;
+    Point mad;
+    double rmsResidual = 0;
+    size_t used = 0;      // pairs kept after outlier rejection
+    size_t rejected = 0;  // pairs dropped by outlier rejection
+};
+
 struct ShapeRecord
 {
     std::vector<GridIndex> indices;
@@ -47,7 +59,7 @@ private:
     void dumpSurrounding();
     Coord splitterCoord(const Coord& c) const;
     std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag, double threshold);
-    std::tuple<Point, Point, double, Point> calculateOffset(GridPtr& bg, GridPtr& ag,
+    OffsetStats calculateOffset(GridPtr& bg, GridPtr& ag,
         const std::vector<ShapePair>& shapes);
     void addArgs();
     void load();
@@ -83,6 +95,8 @@ private:
     Point m_dumpxy;
     double m_dumpfrac;
     int m_minShape;
+    int m_minMatch;
+    int m_passes;
     double m_gridLen;
 
     pdal::PipelineManager m_beforeMgr;
