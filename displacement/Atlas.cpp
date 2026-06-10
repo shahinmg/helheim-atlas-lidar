@@ -85,12 +85,12 @@ void Atlas::addArgs()
     m_args.add("yshift", "Y distance shift", m_shift.y).setPositional();
     m_args.add("dumpxy", "XY pos in UTM meters to dump", m_dumpxy, Point(-1000, -1000));
     m_args.add("dumpij", "IJ pos in grid index to dump", m_dumpij, Coord(-1000, -1000));
-    m_args.add("topfrac", "Top fraction of points by Z used for surface slice (default 0.5)",
-        m_dumpfrac, 0.5);
+    m_args.add("topfrac", "Top fraction of points by height above the tile's fitted "
+        "plane used for surface slice (default 0.5)", m_dumpfrac, 0.5);
     m_args.add("minshape", "Minimum shape size in grid cells; smaller shapes are dropped "
         "before matching (default 1, disables filter)", m_minShape, 1);
     m_args.add("minmatch", "Minimum matched shape pairs (after outlier rejection) "
-        "required to accept a cell (default 3)", m_minMatch, 3);
+        "required to accept a cell (default 1, disables filter)", m_minMatch, 1);
     m_args.add("passes", "Number of grid passes; passes after the first reprocess "
         "every cell seeded from its converged neighborhood (default 1)", m_passes, 1);
     m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
@@ -343,12 +343,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "Before");
 
-    std::sort(v->begin(), v->end(),
-        [](const PointRef& a, const PointRef& b)
-            { return a.compare(Dimension::Id::Z, b); });
-    PointViewPtr slice = v->makeNew();
-    for (PointId i = (PointId)(v->size() * (1.0 - m_dumpfrac)); i < v->size(); ++i)
-        slice->appendPoint(*v, i);
+    PointViewPtr slice = surfaceSlice(v);
     if (slice->empty())
         return false;
 
@@ -392,12 +387,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
             break;
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "After");
-    std::sort(v->begin(), v->end(),
-        [](const PointRef& a, const PointRef& b)
-            { return a.compare(Dimension::Id::Z, b); });
-    slice = v->makeNew();
-    for (PointId i = (PointId)(v->size() * (1.0 - m_dumpfrac)); i < v->size(); ++i)
-        slice->appendPoint(*v, i);
+    slice = surfaceSlice(v);
     if (slice->empty())
         return false;
 
@@ -672,6 +662,73 @@ bool Atlas::removeFliers(pdal::PointViewPtr& v, const Histogram& hist)
         return true;
     }
     return false;
+}
+
+
+// Return the top 'topfrac' of points ranked by height above the tile's
+// least-squares plane. Ranking on plane residuals rather than raw Z keeps
+// the slice from collapsing to the uphill portion of sloped tiles, so the
+// same locally-high features (serac tops, crevasse ridges) are selected
+// across the whole tile in both epochs. The points themselves are not
+// modified; only slice membership depends on the plane.
+pdal::PointViewPtr Atlas::surfaceSlice(pdal::PointViewPtr v)
+{
+    using namespace pdal;
+
+    PointViewPtr slice = v->makeNew();
+    size_t n = v->size();
+    if (n == 0)
+        return slice;
+
+    double mx = 0, my = 0, mz = 0;
+    for (PointId i = 0; i < n; ++i)
+    {
+        mx += v->getFieldAs<double>(Dimension::Id::X, i);
+        my += v->getFieldAs<double>(Dimension::Id::Y, i);
+        mz += v->getFieldAs<double>(Dimension::Id::Z, i);
+    }
+    mx /= n;
+    my /= n;
+    mz /= n;
+
+    double sxx = 0, sxy = 0, syy = 0, sxz = 0, syz = 0;
+    for (PointId i = 0; i < n; ++i)
+    {
+        double dx = v->getFieldAs<double>(Dimension::Id::X, i) - mx;
+        double dy = v->getFieldAs<double>(Dimension::Id::Y, i) - my;
+        double dz = v->getFieldAs<double>(Dimension::Id::Z, i) - mz;
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+        sxz += dx * dz;
+        syz += dy * dz;
+    }
+
+    // Plane slopes from the centered normal equations. Degenerate point
+    // geometry (e.g. a single scan line) gets a flat plane, which reduces
+    // to the old raw-Z ranking.
+    double bx = 0, by = 0;
+    double det = sxx * syy - sxy * sxy;
+    if (det > 1e-10 * sxx * syy)
+    {
+        bx = (sxz * syy - syz * sxy) / det;
+        by = (syz * sxx - sxz * sxy) / det;
+    }
+
+    std::vector<std::pair<double, PointId>> residuals;
+    residuals.reserve(n);
+    for (PointId i = 0; i < n; ++i)
+    {
+        double dx = v->getFieldAs<double>(Dimension::Id::X, i) - mx;
+        double dy = v->getFieldAs<double>(Dimension::Id::Y, i) - my;
+        double z = v->getFieldAs<double>(Dimension::Id::Z, i);
+        residuals.push_back({z - (mz + bx * dx + by * dy), i});
+    }
+    std::sort(residuals.begin(), residuals.end());
+
+    for (size_t i = (size_t)(n * (1.0 - m_dumpfrac)); i < n; ++i)
+        slice->appendPoint(*v, residuals[i].second);
+    return slice;
 }
 
 
