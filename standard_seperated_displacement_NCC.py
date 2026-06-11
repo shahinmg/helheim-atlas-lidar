@@ -31,6 +31,7 @@ Command for displacement calcs
       https://atlas-lidar-helheim.s3.us-west-2.amazonaws.com/copc/south/230108_131655.copc.laz \
       https://atlas-lidar-helheim.s3.us-west-2.amazonaws.com/copc/south/230109_131631.copc.laz \
       --xshift=25.6 --yshift=-2.04 \
+      --ncc \
       --tiff /media/m484s199/qaanaaq/helheim-atlas-lidar/velocities
 
 """
@@ -127,6 +128,7 @@ for i,laz in enumerate(diff_tups):
     args = ['/opt/atlas/helheim-atlas-lidar/displacement/build/atlas', copc_1, copc_2,
             '--xshift='+str(round(xshift*shift_factor,4)),
             '--yshift='+str(round(yshift*shift_factor,4)),
+            '--ncc',
             '--tiff', out_dir]
     args_list.append(args)
 
