@@ -93,6 +93,13 @@ void Atlas::addArgs()
         "every cell seeded from its converged neighborhood (default 1)", m_passes, 1);
     m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
         "(default 1.0)", m_gridLen, 1.0);
+    m_args.add("ncc", "Refine each cell's shape-match displacement by normalized "
+        "cross-correlation of detrended mean-height rasters, with subpixel peak fit. "
+        "Adds bands NCC_X, NCC_Y, NCC_PEAK.", m_ncc);
+    m_args.add("nccradius", "NCC search radius in raster cells around the shape-match "
+        "displacement (default 5)", m_nccRadius, 5);
+    m_args.add("ncclen", "NCC raster cell size in meters, independent of 'gridlen' "
+        "(default 2.0)", m_nccLen, 2.0);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -120,6 +127,13 @@ void Atlas::parse(const pdal::StringList& slist)
         fatal("'passes' must be >= 1.");
     if (m_gridLen <= 0)
         fatal("'gridlen' must be > 0.");
+    if (m_nccRadius < 1)
+        fatal("'nccradius' must be >= 1.");
+    if (m_nccLen <= 0)
+        fatal("'ncclen' must be > 0.");
+    if (m_nccRadius * m_nccLen > m_overlap)
+        fatal("'nccradius' x 'ncclen' must not exceed the tile overlap (" +
+            std::to_string((int)m_overlap) + "m).");
 }
 
 void Atlas::run(const pdal::StringList& s)
@@ -339,7 +353,9 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "Before");
 
-    PointViewPtr slice = surfaceSlice(v);
+    PlaneFit bPlane = fitPlane(v);
+    PointViewPtr beforeView = v;
+    PointViewPtr slice = surfaceSlice(v, bPlane);
     if (slice->empty())
         return false;
 
@@ -383,7 +399,8 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
             break;
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "After");
-    slice = surfaceSlice(v);
+    PlaneFit aPlane = fitPlane(v);
+    slice = surfaceSlice(v, aPlane);
     if (slice->empty())
         return false;
 
@@ -429,6 +446,51 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
     m_field.setMedianOffset(coord, median);
     m_field.setMadOffset(coord, mad);
     m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
+
+    if (m_ncc)
+    {
+        // Rasterize the full flier-removed clouds (not the top slice — NCC
+        // wants the whole surface, the slice exists only for blob detection)
+        // over the core tile plus the overlap buffer. The after raster
+        // covers the same area shifted by the converged shape-match offset,
+        // with a search margin; cells outside the after view's coverage stay
+        // NaN and drop out of the correlation. NCC then measures the
+        // residual displacement the shape match missed.
+        int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
+        int rh = rw;
+        int R = m_nccRadius;
+        double margin = R * m_nccLen;
+
+        // Splat kernel adapts to the sparser of the two tiles: dense tiles
+        // get sharp single-cell binning (best subpixel precision), sparse
+        // tiles get progressively wider Gaussian splats so the before/after
+        // rasters still overlap. Both rasters use the same kernel to keep
+        // the smoothing symmetric.
+        double density = (double)std::min(beforeView->size(), v->size()) /
+            ((double)rw * rh);
+        int kernel = density >= 0.15 ? 0 : (density >= 0.05 ? 1 : 2);
+
+        Raster br = buildRaster(beforeView,
+            {box.minx - m_overlap, box.miny - m_overlap}, rw, rh, bPlane,
+            kernel);
+        Raster ar = buildRaster(v,
+            {box.minx - m_overlap + offset.x - margin,
+             box.miny - m_overlap + offset.y - margin},
+            rw + 2 * R, rh + 2 * R, aPlane, kernel);
+
+        auto [residual, peak, onEdge] = nccOffset(br, ar, R);
+        if (peak >= -1.0)
+            m_field.setNccPeak(coord, (float)peak);
+
+        // Accept the refinement only with a confident, interior peak.
+        // The refined total goes to the NCC bands; bands 1-13 and the
+        // neighbor-seeding field keep the pure shape-match result so the
+        // two estimates stay directly comparable per cell.
+        const double minPeak = 0.5;
+        if (peak >= minPeak && !onEdge)
+            m_field.setNccOffset(coord,
+                { offset.x + residual.x, offset.y + residual.y });
+    }
 
     return true;
 }
@@ -624,38 +686,31 @@ bool Atlas::removeFliers(pdal::PointViewPtr& v, const Histogram& hist)
 }
 
 
-// Return the top 'topfrac' of points ranked by height above the tile's
-// least-squares plane. Ranking on plane residuals rather than raw Z keeps
-// the slice from collapsing to the uphill portion of sloped tiles, so the
-// same locally-high features (serac tops, crevasse ridges) are selected
-// across the whole tile in both epochs. The points themselves are not
-// modified; only slice membership depends on the plane.
-pdal::PointViewPtr Atlas::surfaceSlice(pdal::PointViewPtr v)
+PlaneFit Atlas::fitPlane(pdal::PointViewPtr v)
 {
     using namespace pdal;
 
-    PointViewPtr slice = v->makeNew();
+    PlaneFit p { 0, 0, 0, 0, 0 };
     size_t n = v->size();
     if (n == 0)
-        return slice;
+        return p;
 
-    double mx = 0, my = 0, mz = 0;
     for (PointId i = 0; i < n; ++i)
     {
-        mx += v->getFieldAs<double>(Dimension::Id::X, i);
-        my += v->getFieldAs<double>(Dimension::Id::Y, i);
-        mz += v->getFieldAs<double>(Dimension::Id::Z, i);
+        p.mx += v->getFieldAs<double>(Dimension::Id::X, i);
+        p.my += v->getFieldAs<double>(Dimension::Id::Y, i);
+        p.mz += v->getFieldAs<double>(Dimension::Id::Z, i);
     }
-    mx /= n;
-    my /= n;
-    mz /= n;
+    p.mx /= n;
+    p.my /= n;
+    p.mz /= n;
 
     double sxx = 0, sxy = 0, syy = 0, sxz = 0, syz = 0;
     for (PointId i = 0; i < n; ++i)
     {
-        double dx = v->getFieldAs<double>(Dimension::Id::X, i) - mx;
-        double dy = v->getFieldAs<double>(Dimension::Id::Y, i) - my;
-        double dz = v->getFieldAs<double>(Dimension::Id::Z, i) - mz;
+        double dx = v->getFieldAs<double>(Dimension::Id::X, i) - p.mx;
+        double dy = v->getFieldAs<double>(Dimension::Id::Y, i) - p.my;
+        double dz = v->getFieldAs<double>(Dimension::Id::Z, i) - p.mz;
         sxx += dx * dx;
         sxy += dx * dy;
         syy += dy * dy;
@@ -665,29 +720,220 @@ pdal::PointViewPtr Atlas::surfaceSlice(pdal::PointViewPtr v)
 
     // Plane slopes from the centered normal equations. Degenerate point
     // geometry (e.g. a single scan line) gets a flat plane, which reduces
-    // to the old raw-Z ranking.
-    double bx = 0, by = 0;
+    // to raw-Z ranking.
     double det = sxx * syy - sxy * sxy;
     if (det > 1e-10 * sxx * syy)
     {
-        bx = (sxz * syy - syz * sxy) / det;
-        by = (syz * sxx - sxz * sxy) / det;
+        p.bx = (sxz * syy - syz * sxy) / det;
+        p.by = (syz * sxx - sxz * sxy) / det;
     }
+    return p;
+}
+
+
+// Return the top 'topfrac' of points ranked by height above the tile's
+// least-squares plane. Ranking on plane residuals rather than raw Z keeps
+// the slice from collapsing to the uphill portion of sloped tiles, so the
+// same locally-high features (serac tops, crevasse ridges) are selected
+// across the whole tile in both epochs. The points themselves are not
+// modified; only slice membership depends on the plane.
+pdal::PointViewPtr Atlas::surfaceSlice(pdal::PointViewPtr v, const PlaneFit& plane)
+{
+    using namespace pdal;
+
+    PointViewPtr slice = v->makeNew();
+    size_t n = v->size();
+    if (n == 0)
+        return slice;
 
     std::vector<std::pair<double, PointId>> residuals;
     residuals.reserve(n);
     for (PointId i = 0; i < n; ++i)
     {
-        double dx = v->getFieldAs<double>(Dimension::Id::X, i) - mx;
-        double dy = v->getFieldAs<double>(Dimension::Id::Y, i) - my;
+        double x = v->getFieldAs<double>(Dimension::Id::X, i);
+        double y = v->getFieldAs<double>(Dimension::Id::Y, i);
         double z = v->getFieldAs<double>(Dimension::Id::Z, i);
-        residuals.push_back({z - (mz + bx * dx + by * dy), i});
+        residuals.push_back({plane.residual(x, y, z), i});
     }
     std::sort(residuals.begin(), residuals.end());
 
     for (size_t i = (size_t)(n * (1.0 - m_dumpfrac)); i < n; ++i)
         slice->appendPoint(*v, residuals[i].second);
     return slice;
+}
+
+
+// Splat raster of height-above-plane at ncclen resolution. 'kernel' is the
+// splat radius in cells: 0 bins each point into its containing cell (sharp,
+// for dense tiles); 1 or 2 spreads each point over a Gaussian neighborhood
+// (sigma = kernel/2) so sparse tiles produce a continuous weighted surface
+// instead of isolated single-point cells whose joint before/after occupancy
+// is near zero. Detrending by the tile's fitted plane removes slope, so the
+// correlation peak reflects feature structure rather than surface tilt.
+Raster Atlas::buildRaster(pdal::PointViewPtr v, Point origin, int width,
+    int height, const PlaneFit& plane, int kernel)
+{
+    using namespace pdal;
+
+    int K = kernel;
+    double invTwoSigma2 = K ? 1.0 / (2 * (0.5 * K) * (0.5 * K)) : 0;
+
+    Raster r(width, height);
+    for (PointId i = 0; i < v->size(); ++i)
+    {
+        double x = v->getFieldAs<double>(Dimension::Id::X, i);
+        double y = v->getFieldAs<double>(Dimension::Id::Y, i);
+        double z = v->getFieldAs<double>(Dimension::Id::Z, i);
+
+        // Fractional position in cell units.
+        double fx = (x - origin.x) / m_nccLen;
+        double fy = (y - origin.y) / m_nccLen;
+        int cx = (int)std::floor(fx);
+        int cy = (int)std::floor(fy);
+        if (cx < -K || cx >= width + K || cy < -K || cy >= height + K)
+            continue;
+
+        float res = (float)plane.residual(x, y, z);
+        for (int yi = cy - K; yi <= cy + K; ++yi)
+        {
+            if (yi < 0 || yi >= height)
+                continue;
+            for (int xi = cx - K; xi <= cx + K; ++xi)
+            {
+                if (xi < 0 || xi >= width)
+                    continue;
+                double dx = xi + 0.5 - fx;
+                double dy = yi + 0.5 - fy;
+                float wgt = K ?
+                    (float)std::exp(-(dx * dx + dy * dy) * invTwoSigma2) :
+                    1.f;
+                r.at(xi, yi) += wgt * res;
+                r.weight(xi, yi) += wgt;
+            }
+        }
+    }
+    for (int i = 0; i < width * height; ++i)
+        if (r.w[i] > 0)
+            r.z[i] /= r.w[i];
+    return r;
+}
+
+
+// Weighted ZNCC search over integer cell shifts with subpixel peak fit.
+// Cells are weighted by the product of the two splat weights, so halo-only
+// cells contribute in proportion to the data behind them. 'ar' must extend
+// 'searchRadius' cells beyond 'br' on every side so each candidate shift
+// has full support. Returns {residual displacement in meters, peak
+// correlation, peak-on-search-edge}; a peak of -2 means no shift had
+// enough effective support to score.
+std::tuple<Point, double, bool> Atlas::nccOffset(const Raster& br,
+    const Raster& ar, int searchRadius)
+{
+    // Effective sample size (sum(w)^2 / sum(w^2)) required before a
+    // correlation score is meaningful.
+    const double minEffective = 50;
+
+    int R = searchRadius;
+    int diameter = 2 * R + 1;
+    std::vector<double> surface(diameter * diameter, -2.0);
+    auto nccAt = [&](int dx, int dy) -> double& {
+        return surface[(dy + R) * diameter + (dx + R)];
+    };
+
+    double bestNcc = -2.0;
+    int bestDx = 0, bestDy = 0;
+
+    for (int dy = -R; dy <= R; ++dy)
+        for (int dx = -R; dx <= R; ++dx)
+        {
+            double sw = 0, sw2 = 0, sumB = 0, sumA = 0;
+            for (int y = 0; y < br.height; ++y)
+                for (int x = 0; x < br.width; ++x)
+                {
+                    double w = br.weight(x, y) *
+                        ar.weight(x + dx + R, y + dy + R);
+                    if (w <= 0)
+                        continue;
+                    sw += w;
+                    sw2 += w * w;
+                    sumB += w * br.at(x, y);
+                    sumA += w * ar.at(x + dx + R, y + dy + R);
+                }
+            if (sw <= 0 || (sw * sw) / sw2 < minEffective)
+                continue;
+
+            double meanB = sumB / sw;
+            double meanA = sumA / sw;
+            double num = 0, varB = 0, varA = 0;
+            for (int y = 0; y < br.height; ++y)
+                for (int x = 0; x < br.width; ++x)
+                {
+                    double w = br.weight(x, y) *
+                        ar.weight(x + dx + R, y + dy + R);
+                    if (w <= 0)
+                        continue;
+                    double db = br.at(x, y) - meanB;
+                    double da = ar.at(x + dx + R, y + dy + R) - meanA;
+                    num += w * db * da;
+                    varB += w * db * db;
+                    varA += w * da * da;
+                }
+            double denom = std::sqrt(varB * varA);
+            if (denom < 1e-10)
+                continue;
+
+            double ncc = num / denom;
+            nccAt(dx, dy) = ncc;
+            if (ncc > bestNcc)
+            {
+                bestNcc = ncc;
+                bestDx = dx;
+                bestDy = dy;
+            }
+        }
+
+    if (bestNcc < -1.0)
+        return { Point(0, 0), -2.0, true };
+
+    bool onEdge = std::abs(bestDx) == R || std::abs(bestDy) == R;
+
+    // Subpixel refinement, one axis at a time. Gaussian (log-parabola) fit:
+    // correlation peaks are near-Gaussian, and fitting the parabola to the
+    // log of the samples removes most of the pixel-locking bias a plain
+    // parabola shows when the peak is narrower than the cell spacing.
+    // Non-positive samples fall back to the plain parabolic fit. The second
+    // difference must be positive (a genuine maximum). The vertex of the
+    // parabola through (-1,lo), (0,c), (1,hi) is at +0.5*(hi-lo)/(2c-lo-hi).
+    auto subpixel = [](double lo, double c, double hi) -> double
+    {
+        if (lo > 0 && c > 0 && hi > 0)
+        {
+            double ll = std::log(lo), lc = std::log(c), lh = std::log(hi);
+            double d = 2 * lc - ll - lh;
+            if (d > 1e-10)
+                return 0.5 * (lh - ll) / d;
+        }
+        double d = 2 * c - lo - hi;
+        if (d > 1e-10)
+            return 0.5 * (hi - lo) / d;
+        return 0.0;
+    };
+
+    double subDx = bestDx;
+    double subDy = bestDy;
+    if (!onEdge)
+    {
+        double l = nccAt(bestDx - 1, bestDy);
+        double r = nccAt(bestDx + 1, bestDy);
+        if (l > -1.5 && r > -1.5)
+            subDx = bestDx + subpixel(l, bestNcc, r);
+        double dn = nccAt(bestDx, bestDy - 1);
+        double up = nccAt(bestDx, bestDy + 1);
+        if (dn > -1.5 && up > -1.5)
+            subDy = bestDy + subpixel(dn, bestNcc, up);
+    }
+
+    return { Point(subDx * m_nccLen, subDy * m_nccLen), bestNcc, onEdge };
 }
 
 
@@ -776,7 +1022,7 @@ void Atlas::writeTiff(const std::string& filename)
     std::string memPath = "/vsimem/atlas_temp.tif";
     {
         pdal::gdal::Raster raster(memPath, "GTiff", "EPSG:32624", pixelToPos);
-        pdal::gdal::GDALError err = raster.open(xsize, ysize, 13,
+        pdal::gdal::GDALError err = raster.open(xsize, ysize, m_ncc ? 16 : 13,
             Dimension::Type::Float, -9999, pdal::StringList());
 
         if (err != pdal::gdal::GDALError::None)
@@ -795,6 +1041,12 @@ void Atlas::writeTiff(const std::string& filename)
         raster.writeBand(m_field.madXdata(),         -9999.0, 11, "MAD_X");
         raster.writeBand(m_field.madYdata(),         -9999.0, 12, "MAD_Y");
         raster.writeBand(m_field.madZdata(),         -9999.0, 13, "MAD_Z");
+        if (m_ncc)
+        {
+            raster.writeBand(m_field.nccXdata(),     -9999.0, 14, "NCC_X");
+            raster.writeBand(m_field.nccYdata(),     -9999.0, 15, "NCC_Y");
+            raster.writeBand(m_field.nccPeakData(),  -9999.0, 16, "NCC_PEAK");
+        }
     }
 
     GDALDataset* srcDs = static_cast<GDALDataset*>(GDALOpen(memPath.c_str(), GA_ReadOnly));
