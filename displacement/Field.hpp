@@ -156,7 +156,9 @@ public:
     // Returns {valid, estimated_offset, rms_spread_of_neighbors}.
     // Spread is the weighted RMS deviation of neighbor offsets from the mean;
     // used to set an adaptive match threshold in matchShapes.
-    std::tuple<bool, Point, double> initialOffset(Coord c)
+    // With neighborsOnly, the cell's own value is ignored and the estimate
+    // always comes from the neighbor average (used by later grid passes).
+    std::tuple<bool, Point, double> initialOffset(Coord c, bool neighborsOnly = false)
     {
         const double Sqrt2Recip = 0.70710678118;
         double x = 0;
@@ -177,7 +179,7 @@ public:
         int idx = pos(c);
         if (idx >= 0)
         {
-            if (m_valid[idx])
+            if (m_valid[idx] && !neighborsOnly)
                 return { true, { m_x[idx], m_y[idx] }, 0.0 };
 
             // We weight each full neighbor equally and each corner neighbor

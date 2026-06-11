@@ -41,6 +41,7 @@ private:
     Histogram histogram(pdal::PointViewPtr v, pdal::Dimension::Id dim,
         pdal::PointViewPtr debugView, const std::string& label);
     bool removeFliers(pdal::PointViewPtr& v, const Histogram& hist);
+    pdal::PointViewPtr surfaceSlice(pdal::PointViewPtr v);
     GridPtr buildGrid(pdal::PointViewPtr v, Point origin);
     void sortShapes(GridPtr& g);
     void dumpShapes(GridPtr& g);
@@ -83,6 +84,7 @@ private:
     Point m_dumpxy;
     double m_dumpfrac;
     int m_minShape;
+    int m_passes;
     double m_gridLen;
 
     pdal::PipelineManager m_beforeMgr;
