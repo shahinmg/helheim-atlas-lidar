@@ -16,9 +16,20 @@
 
 #include "Field.hpp"
 #include "Grid.hpp"
+#include "Raster.hpp"
 
 namespace AtlasProcessor
 {
+
+// Least-squares plane z ~= mz + bx*(x - mx) + by*(y - my) fitted to a tile.
+struct PlaneFit
+{
+    double mx, my, mz;
+    double bx, by;
+
+    double residual(double x, double y, double z) const
+    { return z - (mz + bx * (x - mx) + by * (y - my)); }
+};
 
 struct ShapeRecord
 {
@@ -41,7 +52,12 @@ private:
     Histogram histogram(pdal::PointViewPtr v, pdal::Dimension::Id dim,
         pdal::PointViewPtr debugView, const std::string& label);
     bool removeFliers(pdal::PointViewPtr& v, const Histogram& hist);
-    pdal::PointViewPtr surfaceSlice(pdal::PointViewPtr v);
+    PlaneFit fitPlane(pdal::PointViewPtr v);
+    pdal::PointViewPtr surfaceSlice(pdal::PointViewPtr v, const PlaneFit& plane);
+    Raster buildRaster(pdal::PointViewPtr v, Point origin, int width,
+        int height, const PlaneFit& plane, int kernel);
+    std::tuple<Point, double, bool> nccOffset(const Raster& br,
+        const Raster& ar, int searchRadius);
     GridPtr buildGrid(pdal::PointViewPtr v, Point origin);
     void sortShapes(GridPtr& g);
     void dumpShapes(GridPtr& g);
@@ -86,6 +102,9 @@ private:
     int m_minShape;
     int m_passes;
     double m_gridLen;
+    bool m_ncc;
+    int m_nccRadius;
+    double m_nccLen;
 
     pdal::PipelineManager m_beforeMgr;
     pdal::PipelineManager m_afterMgr;

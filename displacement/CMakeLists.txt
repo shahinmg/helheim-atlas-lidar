@@ -14,6 +14,7 @@ add_executable(atlas
     Atlas.cpp
     Draw.cpp
     Grid.cpp
+    Raster.hpp
 )
 target_link_libraries(atlas
     PRIVATE

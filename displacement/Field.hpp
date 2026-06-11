@@ -27,6 +27,8 @@ public:
         m_before(width * height, -9999.f), m_after(width * height, -9999.f),
         m_valid(width * height),
         m_matchCount(width * height, -9999.f), m_rmsResidual(width * height, -9999.f),
+        m_nccX(width * height, -9999.f), m_nccY(width * height, -9999.f),
+        m_nccPeak(width * height, -9999.f),
         m_maxLen2(std::numeric_limits<double>::lowest())
     {}
 
@@ -68,6 +70,15 @@ public:
 
     const float *rmsResidualData() const
     { return m_rmsResidual.data(); }
+
+    const float *nccXdata() const
+    { return m_nccX.data(); }
+
+    const float *nccYdata() const
+    { return m_nccY.data(); }
+
+    const float *nccPeakData() const
+    { return m_nccPeak.data(); }
 
     size_t width() const
     { return m_width; }
@@ -111,6 +122,28 @@ public:
         m_medianX[idx] = displacement.x;
         m_medianY[idx] = displacement.y;
         m_medianZ[idx] = displacement.z;
+    }
+
+    // The refined offset is only stored when the NCC peak passes the
+    // acceptance gate; the peak value is stored whenever the search
+    // produced a usable correlation surface.
+    void setNccOffset(Coord c, Point displacement)
+    {
+        int idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_nccX[idx] = displacement.x;
+        m_nccY[idx] = displacement.y;
+    }
+
+    void setNccPeak(Coord c, float peak)
+    {
+        int idx = pos(c);
+        if (idx < 0)
+            return;
+
+        m_nccPeak[idx] = peak;
     }
 
     void setMadOffset(Coord c, Point mad)
@@ -243,6 +276,9 @@ private:
     std::vector<float> m_after;
     std::vector<float> m_matchCount;
     std::vector<float> m_rmsResidual;
+    std::vector<float> m_nccX;
+    std::vector<float> m_nccY;
+    std::vector<float> m_nccPeak;
     std::vector<bool> m_valid;
     double m_maxLen2;
 
