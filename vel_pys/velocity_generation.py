@@ -7,9 +7,16 @@ import rasterio
 import numpy as np
 import pandas as pd
 from multiprocessing import Pool
+from tqdm import tqdm
+import logging
+from datetime import datetime
 
-ncc_path = "/media/m484s199/qaanaaq/helheim_vels/ncc_output/"
-out_path = "/media/m484s199/qaanaaq/helheim_vels/velocity_unsmoothed/"
+LOG_FILE = f"./log/velocity_generation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+vel_path = "/media/m484s199/qaanaaq/helheim_vels/ncc_output/"
+outpath = "/media/m484s199/qaanaaq/helheim_vels/velocity_unsmoothed/"
+
+
 
 # file list
 displacement_tifs = sorted( [file for file in os.listdir(ncc_path) if file.endswith('.tif')] )
@@ -41,9 +48,8 @@ def get_time_delta(file_name):
 
     return time_delta
 
-
-for file in displacement_tifs:
-    with rasterio.open(f'{ncc_path}{file}') as src:
+def calc_velocity(file, in_path=vel_path, out_path=outpath):
+    with rasterio.open(f'{in_path}{file}') as src:
         
         band_dict = {name: index for index, name in zip(src.indexes, src.descriptions)}
 
@@ -124,9 +130,8 @@ for file in displacement_tifs:
                     dst.write(band_data, band_num)
                     dst.set_band_description(band_num, name)
 
-                    
 
-
-
-            
+if __name__ == "__main__":
+    with Pool(processes=os.cpu_count()) as pool:
+          results = pool.starmap(calc_velocity, displacement_tifs)
         
