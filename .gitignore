@@ -1,7 +1,7 @@
 CLAUDE.md
 shape_geoms/
 velocities/
-vel_pys/
+vel_pys/*
 *.tif
 *.aux.xml
 .vscode/
@@ -10,4 +10,5 @@ velocities_debug/
 output/
 docs/
 log/
-
+standard_seperated_displacement_V2.py
+!vel_pys/velocity_generation.py
