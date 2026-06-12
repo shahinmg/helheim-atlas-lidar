@@ -181,7 +181,7 @@ if __name__ == "__main__":
         len(displacement_tifs), vel_path, outpath,
     )
     os.makedirs(outpath, exist_ok=True)
-
+    print(f'Processing on {os.cpu_count()} / {os.cpu_count()} cores')
     with Pool(processes=os.cpu_count(), initializer=setup_logging) as pool:
         results = list(
             tqdm(
