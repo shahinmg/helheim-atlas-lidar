@@ -47,7 +47,7 @@ keys = sorted(obj["path"] for obj in listing if obj["path"].endswith(".copc.laz"
 
 DATE_START   = datetime(2019, 1, 1)
 DATE_END     = datetime(2019, 12, 31)
-out_dir = '/opt/atlas/helheim-atlas-lidar/output/ncc_output' # output for the displacement tif
+out_dir = '/opt/atlas/helheim-atlas-lidar/output/ncc_output_24hr' # output for the displacement tif
 
 def parse_date(key):
     m = re.search(r"(\d{6})_(\d{6})\.copc\.laz", key)
@@ -66,14 +66,8 @@ filtered = sorted(
 def hour_match(scans, target_hours=24, tolerance_hours=3):
     """
     Pair each scan with the *later* scan whose separation is closest to
-    ``target_hours`` (default 24 h). ``scans`` is the sorted list of
-    ``(key, datetime)`` tuples (i.e. ``filtered``).
+    ``target_hours`` (default 24 h). 
 
-    A match is kept only when its separation lands within ``tolerance_hours``
-    of the target, so gaps in the record don't produce a bogus pair spanning
-    several days. Returns a list of ``(key_1_url, key_2_url, shift_factor)``
-    tuples in the same shape as the old ``diff_tups``, where ``shift_factor``
-    scales the rule-of-thumb 6-hour xshift/yshift (24 h -> factor 4.0).
     """
     hour = np.timedelta64(1, 'h')
     matches = []
