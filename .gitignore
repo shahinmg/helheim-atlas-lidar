@@ -10,5 +10,6 @@ velocities_debug/
 output/
 docs/
 log/
-standard_seperated_displacement_V2.py
+!vel_pys/standard_seperated_displacement_V2.py
+!vel_pys/standard_seperated_displacement_NCC.py
 !vel_pys/velocity_generation.py
