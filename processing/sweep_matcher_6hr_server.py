@@ -44,10 +44,10 @@ region = "us-west-2"
 
 # Summer window = the daytime-penalty regime we want to fix (freeze-up hasn't
 # happened yet). Stage 1: a few days to check direction. Stage 2: ~2-3 weeks.
-# Stage-1 window: 3 days (01/07/13/19 each) -> ~12 scans, ~11 consecutive pairs,
-# all four time-of-day windows covered. Widen to ~2-3 weeks for Stage 2.
+# Stage-2 window: ~3 weeks, so noise_resid_std and the cross-tod floor are
+# trustworthy. (Stage-1 direction check used 3 days: DATE_END = 2019-07-18.)
 DATE_START = datetime(2019, 7, 15)
-DATE_END   = datetime(2019, 7, 18)
+DATE_END   = datetime(2019, 8, 5)
 
 xshift = 6.4   # rule of thumb for 6 hour scan difference
 yshift = -.51  # rule of thumb for 6 hour scan difference
@@ -58,6 +58,11 @@ NPROC = 16
 # otherwise sync OUT_BASE back and run analyze() on the workstation copy.
 POINT_PATH = '/opt/atlas/helheim-atlas-lidar/geoms/test_center_point_utm24N.gpkg'
 BUFFER = 200
+
+# Tag appended to the analysis CSVs so successive sweeps don't overwrite each
+# other (e.g. 'stage1', 'stage2'). Per-config tif dirs under OUT_BASE are reused
+# across runs (skip-if-exists), so widening the window only adds new pairs.
+SWEEP_TAG = 'stage2'
 
 # Path 2: shape-GENERATION sweep (find more matches by detecting more shapes).
 # minshape is already at its floor (default 1 = no filter; production doesn't
@@ -78,13 +83,25 @@ BUFFER = 200
 #     'zgate3_plane_mm10': ['--zgate=3', '--zgate-plane', '--matchmin=1.0'],     # plane gate + tighten more
 # }
 
+# Stage-1 generation sweep (commented; kept for the record). Result: slices2
+# raised matches ~29% (daytime 11.8->15.1, up to baseline's nighttime level)
+# with RMS flat; slices3 added more matches but noise crept up; topfrac was not
+# the lever (topfrac09 even lowered daytime match). See memory.
+# SWEEP_CONFIGS = {
+#     'gen_base':     [],                              # topfrac 0.5 (current default)
+#     'topfrac07':    ['--topfrac=0.7'],               # admit more points (denser slice)
+#     'topfrac09':    ['--topfrac=0.9'],               # almost the whole cloud
+#     'slices2':      ['--slices=2'],                  # split top 0.5 into 2 height bands
+#     'slices3':      ['--slices=3'],                  # split top 0.5 into 3 height bands
+#     'slices3_tf09': ['--slices=3', '--topfrac=0.9'], # 3 bands over a deeper slice
+# }
+
+# Stage-2: confirm the slices2 win (slices3 as a noise check) over a 3-week
+# window where noise_resid_std is trustworthy.
 SWEEP_CONFIGS = {
-    'gen_base':     [],                              # topfrac 0.5 (current default)
-    'topfrac07':    ['--topfrac=0.7'],               # admit more points (denser slice)
-    'topfrac09':    ['--topfrac=0.9'],               # almost the whole cloud
-    'slices2':      ['--slices=2'],                  # split top 0.5 into 2 height bands
-    'slices3':      ['--slices=3'],                  # split top 0.5 into 3 height bands
-    'slices3_tf09': ['--slices=3', '--topfrac=0.9'], # 3 bands over a deeper slice
+    'gen_base': [],              # baseline: top slice (topfrac 0.5)
+    'slices2':  ['--slices=2'],  # Stage-1 winner: +29% matches, RMS flat
+    'slices3':  ['--slices=3'],  # more matches, watch for noise creep
 }
 
 # Displacement tif band layout (no --ncc): 6=MEDIAN_X, 7=MEDIAN_Y,
@@ -221,7 +238,7 @@ def analyze():
     df['period'] = np.where(df['t2_hour'].isin([13, 19]), 'day',
                     np.where(df['t2_hour'].isin([1, 7]), 'night', 'other'))
 
-    df.to_csv(os.path.join(OUT_BASE, 'sweep_samples.csv'), index=False)
+    df.to_csv(os.path.join(OUT_BASE, f'sweep_samples_{SWEEP_TAG}.csv'), index=False)
 
     # summary: per config x {all, day, night}
     summ = []
@@ -235,10 +252,10 @@ def analyze():
                          'rms_med': round(gg['rms'].median(), 3),
                          'noise_resid_std': round(gg['resid'].std(), 3)})
     sdf = pd.DataFrame(summ)
-    sdf.to_csv(os.path.join(OUT_BASE, 'sweep_summary.csv'), index=False)
+    sdf.to_csv(os.path.join(OUT_BASE, f'sweep_summary_{SWEEP_TAG}.csv'), index=False)
     print("\n=== sweep summary (match up + noise down, without rms blowup = win) ===")
     print(sdf.to_string(index=False))
-    print(f"\nwrote {OUT_BASE}/sweep_summary.csv and sweep_samples.csv")
+    print(f"\nwrote {OUT_BASE}/sweep_summary_{SWEEP_TAG}.csv and sweep_samples_{SWEEP_TAG}.csv")
 
 
 if __name__ == "__main__":
