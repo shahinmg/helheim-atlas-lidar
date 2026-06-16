@@ -63,7 +63,8 @@ private:
     void dumpShapes(GridPtr& g);
     void dumpSurrounding();
     Coord splitterCoord(const Coord& c) const;
-    std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag, double threshold);
+    std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag, double threshold,
+        const PlaneFit& bPlane, const PlaneFit& aPlane);
     std::tuple<Point, Point, double, Point> calculateOffset(GridPtr& bg, GridPtr& ag,
         const std::vector<ShapePair>& shapes);
     void addArgs();
@@ -105,6 +106,10 @@ private:
     bool m_ncc;
     int m_nccRadius;
     double m_nccLen;
+    double m_zGate;
+    bool m_zGatePlane;
+    double m_matchMin;
+    double m_matchMax;
 
     pdal::PipelineManager m_beforeMgr;
     pdal::PipelineManager m_afterMgr;

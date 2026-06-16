@@ -100,6 +100,17 @@ void Atlas::addArgs()
         "displacement (default 5)", m_nccRadius, 5);
     m_args.add("ncclen", "NCC raster cell size in meters, independent of 'gridlen' "
         "(default 2.0)", m_nccLen, 2.0);
+    m_args.add("zgate", "Max mean-height difference in meters for a shape match; "
+        "rejects elevation-inconsistent pairs so the distance gate can be loosened "
+        "without admitting false matches. 0 disables (default 0)", m_zGate, 0.0);
+    m_args.add("zgate-plane", "Gate 'zgate' on mean height above the tile's fitted "
+        "plane instead of absolute Z, removing the bulk slope term so one zgate "
+        "value works across baselines (requires zgate > 0)", m_zGatePlane);
+    m_args.add("matchmin", "Lower bound in meters for the centroid-distance match "
+        "threshold, applied at well-converged interior cells; lower to tighten "
+        "matching for short baselines (default 2.5)", m_matchMin, 2.5);
+    m_args.add("matchmax", "Upper bound in meters for the centroid-distance match "
+        "threshold; raise to admit more matches (default 4.0)", m_matchMax, 4.0);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -127,6 +138,14 @@ void Atlas::parse(const pdal::StringList& slist)
         fatal("'passes' must be >= 1.");
     if (m_gridLen <= 0)
         fatal("'gridlen' must be > 0.");
+    if (m_zGate < 0)
+        fatal("'zgate' must be >= 0.");
+    if (m_zGatePlane && m_zGate <= 0)
+        fatal("'zgate-plane' requires 'zgate' > 0.");
+    if (m_matchMin <= 0)
+        fatal("'matchmin' must be > 0.");
+    if (m_matchMax < m_matchMin)
+        fatal("'matchmax' must be >= 'matchmin'.");
     if (m_nccRadius < 1)
         fatal("'nccradius' must be >= 1.");
     if (m_nccLen <= 0)
@@ -436,7 +455,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         ag->draw(0, 0, 49, 49, true);
     }
 
-    std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
+    std::vector<ShapePair> shapes = matchShapes(bg, ag, spread, bPlane, aPlane);
     recordShapes(bg, true,  coord, bgOrigin, shapes);
     recordShapes(ag, false, coord, agOrigin, shapes);
     if (shapes.empty())
@@ -514,54 +533,81 @@ void Atlas::dumpShapes(GridPtr& g)
 }
 
 
-std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread)
+std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread,
+    const PlaneFit& bPlane, const PlaneFit& aPlane)
 {
     std::vector<ShapePair> matches;
-    double threshold = std::clamp(spread, 2.5, 4.0);
+    double threshold = std::clamp(spread, m_matchMin, m_matchMax);
 
-    // Build a list of shape pointers
-    std::list<Shape *> asp;
-    for (Shape& s : ag->shapes())
-        asp.push_back(&s);
-
-    int matchCount = 0;
-    for (const Shape& s : bg->shapes())
-    {
-        std::list<Shape *>::iterator exactMatch;
-        double minExactDist = (std::numeric_limits<double>::max)();
-        for (auto it = asp.begin(); it != asp.end(); ++it)
+    // Mean height per shape — a descriptor that lets us admit matches at larger
+    // horizontal distance without false pairings: a genuine pair has nearly
+    // equal mean height, while a spurious match to a horizontally-distant shape
+    // on sloped ground does not. With --zgate-plane the height is taken above
+    // the tile's fitted plane instead of absolute Z, which cancels the bulk
+    // flow-down-slope term (= displacement x tan(slope)) so one zgate works
+    // across baselines. The plane is affine, so the mean height-above-plane of
+    // a shape is just plane.residual at its centroid (no per-point pass).
+    // Computed once per shape (reusing Grid::location) so the O(n^2) mutual-NN
+    // search below stays cheap. Only populated when the gate is on.
+    std::unordered_map<const Shape *, double> meanZ;
+    auto loadHeights = [&](GridPtr& g, const PlaneFit& plane) {
+        Point c, hi;
+        for (Shape& s : g->shapes())
         {
-            Shape *ts = *it;
+            g->location(&s, c, hi);
+            meanZ[&s] = m_zGatePlane ? plane.residual(c.x, c.y, c.z) : c.z;
+        }
+    };
+    if (m_zGate > 0)
+    {
+        loadHeights(bg, bPlane);
+        loadHeights(ag, aPlane);
+    }
 
-            double sizeRatio = (double)s.size() / ts->size();
+    // Closest candidate passing the 3:1 size-ratio gate and, when enabled, the
+    // mean-height gate. Returns the candidate and its horizontal distance.
+    auto nearest = [&](const Shape& s, std::vector<Shape>& candidates)
+        -> std::pair<const Shape *, double>
+    {
+        const Shape *best = nullptr;
+        double minDist = (std::numeric_limits<double>::max)();
+        for (const Shape& ts : candidates)
+        {
+            double sizeRatio = (double)s.size() / ts.size();
             if (sizeRatio > 3.0 || sizeRatio < (1.0 / 3.0))
                 continue;
+            if (m_zGate > 0 && std::abs(meanZ[&s] - meanZ[&ts]) > m_zGate)
+                continue;
 
-            Point bp = s.exactCenter();
-            Point ap = ts->exactCenter();
-            double exactDist = std::sqrt(std::pow(bp.x - ap.x, 2) + std::pow(bp.y - ap.y, 2));
-            if (exactDist < minExactDist)
+            Point sp = s.exactCenter();
+            Point tp = ts.exactCenter();
+            double dist = std::sqrt(std::pow(sp.x - tp.x, 2) +
+                                    std::pow(sp.y - tp.y, 2));
+            if (dist < minDist)
             {
-                minExactDist = exactDist;
-                exactMatch = it;
+                minDist = dist;
+                best = &ts;
             }
         }
-        if (minExactDist > threshold)
+        return { best, minDist };
+    };
+
+    // Mutual nearest neighbor: accept a pair only if each shape is the other's
+    // closest eligible candidate. One-to-one by construction and independent of
+    // visit order, so a large shape can't claim an after-shape that better
+    // matches a different before-shape (the old greedy matcher's failure mode).
+    for (const Shape& s : bg->shapes())
+    {
+        auto [after, dist] = nearest(s, ag->shapes());
+        if (!after || dist > threshold)
+            continue;
+        if (nearest(*after, bg->shapes()).first != &s)
             continue;
 
         if (m_dumpij == m_coord)
-            std::cout << "Match: " << s.id() << " = " << (*exactMatch)->id() << "\n";
-        ShapePair sp {&s, *exactMatch};
-        matches.push_back(sp);
-        asp.erase(exactMatch);
-        matchCount++;
-        if (asp.empty())
-            break;
+            std::cout << "Match: " << s.id() << " = " << after->id() << "\n";
+        matches.push_back({ &s, after });
     }
-/**
-    std::cerr << "Matched " << matchCount << " of " << bg->shapes().size() <<
-        "!\n\n";
-**/
     return matches;
 }
 
