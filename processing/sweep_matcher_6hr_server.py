@@ -96,12 +96,17 @@ SWEEP_TAG = 'stage2'
 #     'slices3_tf09': ['--slices=3', '--topfrac=0.9'], # 3 bands over a deeper slice
 # }
 
-# Stage-2: confirm the slices2 win (slices3 as a noise check) over a 3-week
-# window where noise_resid_std is trustworthy.
+# Stage-2: run the slice candidates head-to-head over a 3-week window where
+# noise_resid_std is trustworthy. slices3_tf09 had the most matches AND the
+# lowest formal sigma=RMS/sqrt(N) at stage 1, but its RMS rose above baseline --
+# a hint its extra matches may be correlated (dedup at 1 cell didn't fully
+# remove them), which would make that formal sigma optimistic. The empirical
+# noise_resid_std here adjudicates.
 SWEEP_CONFIGS = {
-    'gen_base': [],              # baseline: top slice (topfrac 0.5)
-    'slices2':  ['--slices=2'],  # Stage-1 winner: +29% matches, RMS flat
-    'slices3':  ['--slices=3'],  # more matches, watch for noise creep
+    'gen_base':     [],                              # baseline: top slice (topfrac 0.5)
+    'slices2':      ['--slices=2'],                  # +29% matches, RMS flat/better
+    'slices3':      ['--slices=3'],                  # best daytime match, slight noise creep
+    'slices3_tf09': ['--slices=3', '--topfrac=0.9'], # most matches + lowest formal sigma; RMS up
 }
 
 # Displacement tif band layout (no --ncc): 6=MEDIAN_X, 7=MEDIAN_Y,
