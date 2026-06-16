@@ -75,8 +75,8 @@ BUFFER = 200
 #     'zgate3_mm15':       ['--zgate=3', '--matchmin=1.5'],                      # abs-Z gate + tighten interior                                                                             
 #     'zgate3_plane':      ['--zgate=3', '--zgate-plane'],                       # plane-residual gate                                                                                       
 #     'zgate3_plane_mm15': ['--zgate=3', '--zgate-plane', '--matchmin=1.5'],     # plane gate + tighten interior                                                                             
-#     'zgate3_plane_mm10': ['--zgate=3', '--zgate-plane', '--matchmin=1.0'],     # plane gate + tighten more  
-}
+#     'zgate3_plane_mm10': ['--zgate=3', '--zgate-plane', '--matchmin=1.0'],     # plane gate + tighten more
+# }
 
 SWEEP_CONFIGS = {
     'gen_base':     [],                              # topfrac 0.5 (current default)
