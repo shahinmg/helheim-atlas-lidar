@@ -54,6 +54,10 @@ private:
     bool removeFliers(pdal::PointViewPtr& v, const Histogram& hist);
     PlaneFit fitPlane(pdal::PointViewPtr v);
     pdal::PointViewPtr surfaceSlice(pdal::PointViewPtr v, const PlaneFit& plane);
+    std::vector<pdal::PointId> rankByResidual(pdal::PointViewPtr v,
+        const PlaneFit& plane);
+    pdal::PointViewPtr sliceFromRank(pdal::PointViewPtr v,
+        const std::vector<pdal::PointId>& rank, double rankLo, double rankHi);
     Raster buildRaster(pdal::PointViewPtr v, Point origin, int width,
         int height, const PlaneFit& plane, int kernel);
     std::tuple<Point, double, bool> nccOffset(const Raster& br,
@@ -65,8 +69,14 @@ private:
     Coord splitterCoord(const Coord& c) const;
     std::vector<ShapePair> matchShapes(GridPtr& bg, GridPtr& ag, double threshold,
         const PlaneFit& bPlane, const PlaneFit& aPlane);
-    std::tuple<Point, Point, double, Point> calculateOffset(GridPtr& bg, GridPtr& ag,
-        const std::vector<ShapePair>& shapes);
+    void collectPairDisplacements(GridPtr& bg, GridPtr& ag,
+        const std::vector<ShapePair>& shapes,
+        std::vector<double>& pairX, std::vector<double>& pairY,
+        std::vector<double>& pairZ, std::vector<Point>& centers,
+        size_t dedupCount);
+    std::tuple<Point, Point, double, Point> aggregateOffset(
+        const std::vector<double>& pairX, const std::vector<double>& pairY,
+        const std::vector<double>& pairZ);
     void addArgs();
     void load();
     void parse(const pdal::StringList& s);
@@ -102,6 +112,7 @@ private:
     double m_dumpfrac;
     int m_minShape;
     int m_passes;
+    int m_slices;
     double m_gridLen;
     bool m_ncc;
     int m_nccRadius;
