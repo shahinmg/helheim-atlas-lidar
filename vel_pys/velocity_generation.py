@@ -16,8 +16,8 @@ from tqdm import tqdm
 LOG_FILE = f"./log/velocity_generation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
-vel_path = "/media/m484s199/qaanaaq/helheim_vels/ncc_output/"
-outpath = "/media/m484s199/qaanaaq/helheim_vels/velocity_unsmoothed/"
+vel_path = "/media/m484s199/qaanaaq/helheim_vels/displacements/ncc_output_24hr/"
+outpath = "/media/m484s199/qaanaaq/helheim_vels/velocity_24hr_unsmoothed/"
 
 
 
