@@ -14,3 +14,4 @@ log/
 !vel_pys/velocity_generation.py
 icp_diag/
 prof_data/
+processing/sweep_matcher_6hr_*
