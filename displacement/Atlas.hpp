@@ -42,6 +42,22 @@ struct ShapeRecord
     size_t matchId;  // SIZE_MAX if unmatched
 };
 
+// Deferred NCC work captured during the (serial, seeding-dependent) shape-match
+// spiral so the pure-compute refinement can run in parallel afterward. Holds
+// the flier-removed views (PDAL views are cheap PointId index vectors over a
+// shared table, so capturing them does not copy point data), the fitted planes,
+// the core-tile bounds, and the converged shape-match offset.
+struct NccWork
+{
+    Coord coord;
+    pdal::PointViewPtr before;
+    pdal::PointViewPtr after;
+    PlaneFit bPlane;
+    PlaneFit aPlane;
+    pdal::BOX2D box;
+    Point offset;
+};
+
 class Atlas
 {
 public:
@@ -82,6 +98,7 @@ private:
     void parse(const pdal::StringList& s);
     bool process(Coord c, Point& offset, double spread);
     void processGrid();
+    void nccPass();
     void throwError(const std::string& s);
     void writeSimple();
     void writeTiff(const std::string& filename);
@@ -127,6 +144,7 @@ private:
     const double m_len = 100.0;
     const double m_overlap = 20.0;
     std::vector<ShapeRecord> m_shapeRecords;
+    std::vector<NccWork> m_nccWork;
     std::string m_tiffDir;
     std::string m_geojsonDir;
     std::string m_svgDir;

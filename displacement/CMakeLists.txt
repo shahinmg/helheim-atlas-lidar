@@ -8,6 +8,7 @@ project(ATLAS
 find_package(PDAL 2.7 REQUIRED CONFIG)
 find_package(GDAL REQUIRED CONFIG)
 find_package(Eigen3 REQUIRED CONFIG)
+find_package(OpenMP REQUIRED)
 
 add_executable(atlas
     App.cpp
@@ -21,6 +22,7 @@ target_link_libraries(atlas
         pdalcpp
         Eigen3::Eigen
         GDAL::GDAL
+        OpenMP::OpenMP_CXX
 )
 
 target_compile_features(atlas

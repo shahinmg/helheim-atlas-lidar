@@ -14,11 +14,63 @@
 #include "Draw.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <math.h>
 #include <numeric>
 
 #include <gdal_priv.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// ---- lightweight phase profiler (single-threaded; ~ns RAII overhead) ----
+namespace atlasprof
+{
+    using clk = std::chrono::steady_clock;
+    struct Acc { double secs = 0; long long n = 0; };
+    static Acc g_load, g_grid, g_output;       // top-level wall phases
+    static Acc g_prep, g_slices, g_ncc;        // per-cell compute phases
+    static Acc g_detect, g_match;              // inside the --slices loop
+    static long long g_cells = 0;              // cells that did real work
+    static int g_nslices = 0;
+
+    inline double since(clk::time_point t)
+    { return std::chrono::duration<double>(clk::now() - t).count(); }
+
+    inline void report()
+    {
+        double total = g_load.secs + g_grid.secs + g_ncc.secs + g_output.secs;
+        auto pct = [&](double s, double base) { return base > 0 ? 100.0 * s / base : 0.0; };
+        int threads = 1;
+#ifdef _OPENMP
+        threads = omp_get_max_threads();
+#endif
+        fprintf(stderr, "\n==== ATLAS PROFILE (slices=%d, cells=%lld, omp_threads=%d) ====\n",
+            g_nslices, g_cells, threads);
+        fprintf(stderr, "%-18s %9.3f s  %5.1f%% of wall\n", "load (PDAL I/O)",
+            g_load.secs, pct(g_load.secs, total));
+        fprintf(stderr, "%-18s %9.3f s  %5.1f%% of wall\n", "processGrid (serial)",
+            g_grid.secs, pct(g_grid.secs, total));
+        fprintf(stderr, "%-18s %9.3f s  %5.1f%% of wall  (OMP PARALLEL)\n", "nccPass",
+            g_ncc.secs, pct(g_ncc.secs, total));
+        fprintf(stderr, "%-18s %9.3f s  %5.1f%% of wall\n", "output (tiff..)",
+            g_output.secs, pct(g_output.secs, total));
+        fprintf(stderr, "  --- processGrid serial breakdown ---\n");
+        fprintf(stderr, "  %-22s %9.3f s  %5.1f%% of grid\n", "prep(flier/plane/rank)",
+            g_prep.secs, pct(g_prep.secs, g_grid.secs));
+        fprintf(stderr, "  %-22s %9.3f s  %5.1f%% of grid\n", "slices loop",
+            g_slices.secs, pct(g_slices.secs, g_grid.secs));
+        fprintf(stderr, "      %-18s %9.3f s  %5.1f%% of slices\n",
+            "detect", g_detect.secs, pct(g_detect.secs, g_slices.secs));
+        fprintf(stderr, "      %-18s %9.3f s  %5.1f%% of slices\n",
+            "match", g_match.secs, pct(g_match.secs, g_slices.secs));
+        fprintf(stderr, "%-18s %9.3f s\n", "TOTAL (wall)", total);
+        fprintf(stderr, "========================================\n");
+    }
+}
 
 #include <pdal/private/gdal/GDALUtils.hpp>
 #include <pdal/private/gdal/Raster.hpp>
@@ -166,8 +218,20 @@ void Atlas::run(const pdal::StringList& s)
     parse(s);
     try
     {
+        atlasprof::g_nslices = m_slices;
+        auto _t = atlasprof::clk::now();
         load();
+        atlasprof::g_load.secs += atlasprof::since(_t);
+
+        _t = atlasprof::clk::now();
         processGrid();
+        atlasprof::g_grid.secs += atlasprof::since(_t);
+
+        _t = atlasprof::clk::now();
+        nccPass();
+        atlasprof::g_ncc.secs += atlasprof::since(_t);
+
+        _t = atlasprof::clk::now();
         namespace fs = std::filesystem;
         auto stripCopc = [](std::string s) -> std::string {
             auto pos = s.rfind(".copc");
@@ -197,6 +261,8 @@ void Atlas::run(const pdal::StringList& s)
             : fs::path(m_tiffDir) / (stem + ".tif");
         writeTiff(tiffPath.string());
 //        read(filename);
+        atlasprof::g_output.secs += atlasprof::since(_t);
+        atlasprof::report();
     }
     catch (const pdal::pdal_error& err)
     {
@@ -274,9 +340,12 @@ void Atlas::processGrid()
     // grid traversal each.
     for (int pass = 0; pass < m_passes; ++pass)
     {
-        // Shape records from earlier passes are superseded.
+        // Shape records and deferred NCC work from earlier passes are superseded.
         if (pass > 0)
+        {
             m_shapeRecords.clear();
+            m_nccWork.clear();
+        }
 
         for (int i = 0; i <= maxRadius; ++i)
         {
@@ -367,6 +436,8 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         return false;
     m_field.setBeforeCount(coord, v->size());
 
+    atlasprof::g_cells++;
+    auto _tp = atlasprof::clk::now();
     pdal::PointViewPtr debugView;
     if (coord == m_dumpij)
         debugView = v->makeNew();
@@ -379,6 +450,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
     PlaneFit bPlane = fitPlane(v);
     PointViewPtr beforeView = v;
+    atlasprof::g_prep.secs += atlasprof::since(_tp);
 
     // box is the nominal core tile bounds (without overlap), from the BEFORE
     // splitter (still 'splitter' here). Shift the grid origin back by m_overlap
@@ -409,6 +481,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         return false;
     m_field.setAfterCount(coord, v->size());
 
+    _tp = atlasprof::clk::now();
     if (coord == m_dumpij)
         debugView = v->makeNew();
     hist = histogram(v, Dimension::Id::Z, debugView, "After");
@@ -419,6 +492,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
             hist = histogram(v, Dimension::Id::Z, debugView, "After");
     PlaneFit aPlane = fitPlane(v);
     PointViewPtr afterView = v;
+    atlasprof::g_prep.secs += atlasprof::since(_tp);
 
     // The "after" tile grid is placed at the BEFORE origin shifted by the
     // current displacement estimate ("box" is the origin of the BEFORE points).
@@ -428,8 +502,12 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
     // Sort each cloud by height above its plane ONCE; bands are sliced from the
     // rank below rather than re-sorting per band.
+    _tp = atlasprof::clk::now();
     std::vector<PointId> bRank = rankByResidual(beforeView, bPlane);
     std::vector<PointId> aRank = rankByResidual(afterView, aPlane);
+    atlasprof::g_prep.secs += atlasprof::since(_tp);
+
+    auto _tslices = atlasprof::clk::now();
 
     // Detect and match shapes over m_slices contiguous residual bands of the top
     // 'topfrac', pooling the per-pair displacements. With m_slices == 1 the band
@@ -455,6 +533,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         if (bSlice->empty() || aSlice->empty())
             continue;
 
+        auto _tdet = atlasprof::clk::now();
         GridPtr bg = buildGrid(bSlice, bgOrigin);
         bg->findShapes(2);
         pruneShapes(bg, bgOrigin, box);
@@ -465,6 +544,7 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
         sortShapes(bg);
         sortShapes(ag);
+        atlasprof::g_detect.secs += atlasprof::since(_tdet);
 
         if (m_dumpij == coord && k == 0)
         {
@@ -474,13 +554,16 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
             ag->draw(0, 0, 49, 49, true);
         }
 
+        auto _tmat = atlasprof::clk::now();
         std::vector<ShapePair> shapes = matchShapes(bg, ag, spread, bPlane, aPlane);
         recordShapes(bg, true,  coord, bgOrigin, shapes);
         recordShapes(ag, false, coord, agOrigin, shapes);
         size_t priorBands = centers.size();
         collectPairDisplacements(bg, ag, shapes, pairX, pairY, pairZ,
             centers, priorBands);
+        atlasprof::g_match.secs += atlasprof::since(_tmat);
     }
+    atlasprof::g_slices.secs += atlasprof::since(_tslices);
 
     if (pairX.empty())
         return false;
@@ -493,50 +576,65 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
     if (m_ncc)
     {
-        // Rasterize the full flier-removed clouds (not the top slice — NCC
-        // wants the whole surface, the slice exists only for blob detection)
-        // over the core tile plus the overlap buffer. The after raster
-        // covers the same area shifted by the converged shape-match offset,
-        // with a search margin; cells outside the after view's coverage stay
-        // NaN and drop out of the correlation. NCC then measures the
-        // residual displacement the shape match missed.
-        int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
-        int rh = rw;
-        int R = m_nccRadius;
-        double margin = R * m_nccLen;
+        // Defer the (pure-compute) NCC refinement: the shape-match offset for
+        // this cell has converged and feeds nothing downstream of itself, so
+        // capture the inputs and refine all cells in parallel after the
+        // serial seeding spiral completes. See nccPass().
+        m_nccWork.push_back({ coord, beforeView, v, bPlane, aPlane, box, offset });
+    }
+
+    return true;
+}
+
+
+// Pure-compute NCC refinement of every cell captured during processGrid, run in
+// parallel. Each work item is independent: it reads its own (already
+// materialized) flier-removed views and writes only its own Field cells
+// (m_nccX/Y/Peak), which are preallocated, so distinct-cell writes need no
+// synchronization. No PDAL view extraction happens here -- that all occurred in
+// the serial spiral -- so the loop is just rasterization + ZNCC arithmetic.
+void Atlas::nccPass()
+{
+    int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
+    int rh = rw;
+    int R = m_nccRadius;
+    double margin = R * m_nccLen;
+    const double minPeak = 0.5;
+
+    long long n = (long long)m_nccWork.size();
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 16)
+#endif
+    for (long long i = 0; i < n; ++i)
+    {
+        const NccWork& w = m_nccWork[i];
 
         // Splat kernel adapts to the sparser of the two tiles: dense tiles
         // get sharp single-cell binning (best subpixel precision), sparse
         // tiles get progressively wider Gaussian splats so the before/after
         // rasters still overlap. Both rasters use the same kernel to keep
         // the smoothing symmetric.
-        double density = (double)std::min(beforeView->size(), v->size()) /
+        double density = (double)std::min(w.before->size(), w.after->size()) /
             ((double)rw * rh);
         int kernel = density >= 0.15 ? 0 : (density >= 0.05 ? 1 : 2);
 
-        Raster br = buildRaster(beforeView,
-            {box.minx - m_overlap, box.miny - m_overlap}, rw, rh, bPlane,
+        Raster br = buildRaster(w.before,
+            {w.box.minx - m_overlap, w.box.miny - m_overlap}, rw, rh, w.bPlane,
             kernel);
-        Raster ar = buildRaster(v,
-            {box.minx - m_overlap + offset.x - margin,
-             box.miny - m_overlap + offset.y - margin},
-            rw + 2 * R, rh + 2 * R, aPlane, kernel);
+        Raster ar = buildRaster(w.after,
+            {w.box.minx - m_overlap + w.offset.x - margin,
+             w.box.miny - m_overlap + w.offset.y - margin},
+            rw + 2 * R, rh + 2 * R, w.aPlane, kernel);
 
         auto [residual, peak, onEdge] = nccOffset(br, ar, R);
         if (peak >= -1.0)
-            m_field.setNccPeak(coord, (float)peak);
+            m_field.setNccPeak(w.coord, (float)peak);
 
         // Accept the refinement only with a confident, interior peak.
-        // The refined total goes to the NCC bands; bands 1-13 and the
-        // neighbor-seeding field keep the pure shape-match result so the
-        // two estimates stay directly comparable per cell.
-        const double minPeak = 0.5;
         if (peak >= minPeak && !onEdge)
-            m_field.setNccOffset(coord,
-                { offset.x + residual.x, offset.y + residual.y });
+            m_field.setNccOffset(w.coord,
+                { w.offset.x + residual.x, w.offset.y + residual.y });
     }
-
-    return true;
 }
 
 
