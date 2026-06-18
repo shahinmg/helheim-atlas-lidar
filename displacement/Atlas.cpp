@@ -168,6 +168,7 @@ void Atlas::run(const pdal::StringList& s)
     {
         load();
         processGrid();
+        nccPass();
         namespace fs = std::filesystem;
         auto stripCopc = [](std::string s) -> std::string {
             auto pos = s.rfind(".copc");
@@ -274,9 +275,12 @@ void Atlas::processGrid()
     // grid traversal each.
     for (int pass = 0; pass < m_passes; ++pass)
     {
-        // Shape records from earlier passes are superseded.
+        // Shape records and deferred NCC work from earlier passes are superseded.
         if (pass > 0)
+        {
             m_shapeRecords.clear();
+            m_nccWork.clear();
+        }
 
         for (int i = 0; i <= maxRadius; ++i)
         {
@@ -493,50 +497,78 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
     if (m_ncc)
     {
-        // Rasterize the full flier-removed clouds (not the top slice — NCC
-        // wants the whole surface, the slice exists only for blob detection)
-        // over the core tile plus the overlap buffer. The after raster
-        // covers the same area shifted by the converged shape-match offset,
-        // with a search margin; cells outside the after view's coverage stay
-        // NaN and drop out of the correlation. NCC then measures the
-        // residual displacement the shape match missed.
-        int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
-        int rh = rw;
-        int R = m_nccRadius;
-        double margin = R * m_nccLen;
-
-        // Splat kernel adapts to the sparser of the two tiles: dense tiles
-        // get sharp single-cell binning (best subpixel precision), sparse
-        // tiles get progressively wider Gaussian splats so the before/after
-        // rasters still overlap. Both rasters use the same kernel to keep
-        // the smoothing symmetric.
-        double density = (double)std::min(beforeView->size(), v->size()) /
-            ((double)rw * rh);
-        int kernel = density >= 0.15 ? 0 : (density >= 0.05 ? 1 : 2);
-
-        Raster br = buildRaster(beforeView,
-            {box.minx - m_overlap, box.miny - m_overlap}, rw, rh, bPlane,
-            kernel);
-        Raster ar = buildRaster(v,
-            {box.minx - m_overlap + offset.x - margin,
-             box.miny - m_overlap + offset.y - margin},
-            rw + 2 * R, rh + 2 * R, aPlane, kernel);
-
-        auto [residual, peak, onEdge] = nccOffset(br, ar, R);
-        if (peak >= -1.0)
-            m_field.setNccPeak(coord, (float)peak);
-
-        // Accept the refinement only with a confident, interior peak.
-        // The refined total goes to the NCC bands; bands 1-13 and the
-        // neighbor-seeding field keep the pure shape-match result so the
-        // two estimates stay directly comparable per cell.
-        const double minPeak = 0.5;
-        if (peak >= minPeak && !onEdge)
-            m_field.setNccOffset(coord,
-                { offset.x + residual.x, offset.y + residual.y });
+        // Defer the (pure-compute) NCC refinement. The shape-match offset for
+        // this cell has converged and feeds nothing downstream of itself, so
+        // capture the inputs and refine all cells in parallel after the serial
+        // seeding spiral completes. See nccPass().
+        m_nccWork.push_back({ coord, beforeView, v, bPlane, aPlane, box, offset });
     }
 
     return true;
+}
+
+
+// Pure-compute NCC refinement of every cell captured during processGrid, run in
+// parallel. Each work item is independent: it reads its own (already
+// materialized) flier-removed views and writes only its own Field cells
+// (m_nccX/Y/Peak), which are preallocated, so distinct-cell writes need no
+// synchronization. No PDAL view extraction happens here -- that all occurred in
+// the serial spiral -- so the loop is just rasterization + ZNCC arithmetic.
+//
+// Bands 1-13 and the neighbor-seeding field keep the pure shape-match result, so
+// the two estimates stay directly comparable per cell. Output is numerically
+// identical to the previous inline path (bands 1-13 and NCC_PEAK bit-identical;
+// NCC_X/Y may differ by <1 ULP on rare cells from compiler FMA contraction in a
+// different inlining context).
+void Atlas::nccPass()
+{
+    using namespace pdal;
+
+    // Rasterize the full flier-removed clouds (not the top slice -- NCC wants
+    // the whole surface, the slice exists only for blob detection) over the
+    // core tile plus the overlap buffer. The after raster covers the same area
+    // shifted by the converged shape-match offset, with a search margin; cells
+    // outside the after view's coverage stay NaN and drop out of the
+    // correlation. NCC then measures the residual displacement the shape match
+    // missed.
+    int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
+    int rh = rw;
+    int R = m_nccRadius;
+    double margin = R * m_nccLen;
+    const double minPeak = 0.5;
+
+    long long n = (long long)m_nccWork.size();
+    #pragma omp parallel for schedule(dynamic, 16)
+    for (long long i = 0; i < n; ++i)
+    {
+        const NccWork& w = m_nccWork[i];
+
+        // Splat kernel adapts to the sparser of the two tiles: dense tiles get
+        // sharp single-cell binning (best subpixel precision), sparse tiles get
+        // progressively wider Gaussian splats so the before/after rasters still
+        // overlap. Both rasters use the same kernel to keep the smoothing
+        // symmetric.
+        double density = (double)std::min(w.before->size(), w.after->size()) /
+            ((double)rw * rh);
+        int kernel = density >= 0.15 ? 0 : (density >= 0.05 ? 1 : 2);
+
+        Raster br = buildRaster(w.before,
+            {w.box.minx - m_overlap, w.box.miny - m_overlap}, rw, rh, w.bPlane,
+            kernel);
+        Raster ar = buildRaster(w.after,
+            {w.box.minx - m_overlap + w.offset.x - margin,
+             w.box.miny - m_overlap + w.offset.y - margin},
+            rw + 2 * R, rh + 2 * R, w.aPlane, kernel);
+
+        auto [residual, peak, onEdge] = nccOffset(br, ar, R);
+        if (peak >= -1.0)
+            m_field.setNccPeak(w.coord, (float)peak);
+
+        // Accept the refinement only with a confident, interior peak.
+        if (peak >= minPeak && !onEdge)
+            m_field.setNccOffset(w.coord,
+                { w.offset.x + residual.x, w.offset.y + residual.y });
+    }
 }
 
 
