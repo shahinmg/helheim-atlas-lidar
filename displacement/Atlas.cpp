@@ -93,7 +93,7 @@ void Atlas::addArgs()
         "every cell seeded from its converged neighborhood (default 1)", m_passes, 1);
     m_args.add("slices", "Number of contiguous height bands the top 'topfrac' is "
         "split into for shape detection; shapes from all bands are matched and "
-        "their displacements pooled (default 2)", m_slices, 2);
+        "their displacements pooled (default 1)", m_slices, 1);
     m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
         "(default 1.0)", m_gridLen, 1.0);
     m_args.add("ncc", "Refine each cell's shape-match displacement by normalized "
