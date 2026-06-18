@@ -47,7 +47,7 @@ keys = sorted(obj["path"] for obj in listing if obj["path"].endswith(".copc.laz"
 
 DATE_START   = datetime(2019, 1, 1)
 DATE_END     = datetime(2019, 12, 31)
-out_dir = '/opt/atlas/helheim-atlas-lidar/output/ncc_output' # output for the displacement tif
+out_dir = '/opt/atlas/helheim-atlas-lidar/output/atlas_north' # output for the displacement tif
 os.makedirs(out_dir, exist_ok=True)
 
 def parse_date(key):
