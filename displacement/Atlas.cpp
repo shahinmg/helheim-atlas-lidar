@@ -91,6 +91,9 @@ void Atlas::addArgs()
         "before matching (default 1, disables filter)", m_minShape, 1);
     m_args.add("passes", "Number of grid passes; passes after the first reprocess "
         "every cell seeded from its converged neighborhood (default 1)", m_passes, 1);
+    m_args.add("slices", "Number of contiguous height bands the top 'topfrac' is "
+        "split into for shape detection; shapes from all bands are matched and "
+        "their displacements pooled (default 2)", m_slices, 2);
     m_args.add("gridlen", "Grid cell size in meters for flood-fill shape detection "
         "(default 1.0)", m_gridLen, 1.0);
     m_args.add("ncc", "Refine each cell's shape-match displacement by normalized "
@@ -100,6 +103,17 @@ void Atlas::addArgs()
         "displacement (default 5)", m_nccRadius, 5);
     m_args.add("ncclen", "NCC raster cell size in meters, independent of 'gridlen' "
         "(default 2.0)", m_nccLen, 2.0);
+    m_args.add("zgate", "Max mean-height difference in meters for a shape match; "
+        "rejects elevation-inconsistent pairs so the distance gate can be loosened "
+        "without admitting false matches. 0 disables (default 0)", m_zGate, 0.0);
+    m_args.add("zgate-plane", "Gate 'zgate' on mean height above the tile's fitted "
+        "plane instead of absolute Z, removing the bulk slope term so one zgate "
+        "value works across baselines (requires zgate > 0)", m_zGatePlane);
+    m_args.add("matchmin", "Lower bound in meters for the centroid-distance match "
+        "threshold, applied at well-converged interior cells; lower to tighten "
+        "matching for short baselines (default 2.5)", m_matchMin, 2.5);
+    m_args.add("matchmax", "Upper bound in meters for the centroid-distance match "
+        "threshold; raise to admit more matches (default 4.0)", m_matchMax, 4.0);
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -125,8 +139,18 @@ void Atlas::parse(const pdal::StringList& slist)
         fatal("'minshape' must be >= 1.");
     if (m_passes < 1)
         fatal("'passes' must be >= 1.");
+    if (m_slices < 1)
+        fatal("'slices' must be >= 1.");
     if (m_gridLen <= 0)
         fatal("'gridlen' must be > 0.");
+    if (m_zGate < 0)
+        fatal("'zgate' must be >= 0.");
+    if (m_zGatePlane && m_zGate <= 0)
+        fatal("'zgate-plane' requires 'zgate' > 0.");
+    if (m_matchMin <= 0)
+        fatal("'matchmin' must be > 0.");
+    if (m_matchMax < m_matchMin)
+        fatal("'matchmax' must be >= 'matchmin'.");
     if (m_nccRadius < 1)
         fatal("'nccradius' must be >= 1.");
     if (m_nccLen <= 0)
@@ -144,6 +168,7 @@ void Atlas::run(const pdal::StringList& s)
     {
         load();
         processGrid();
+        nccPass();
         namespace fs = std::filesystem;
         auto stripCopc = [](std::string s) -> std::string {
             auto pos = s.rfind(".copc");
@@ -250,9 +275,12 @@ void Atlas::processGrid()
     // grid traversal each.
     for (int pass = 0; pass < m_passes; ++pass)
     {
-        // Shape records from earlier passes are superseded.
+        // Shape records and deferred NCC work from earlier passes are superseded.
         if (pass > 0)
+        {
             m_shapeRecords.clear();
+            m_nccWork.clear();
+        }
 
         for (int i = 0; i <= maxRadius; ++i)
         {
@@ -355,35 +383,29 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
 
     PlaneFit bPlane = fitPlane(v);
     PointViewPtr beforeView = v;
-    PointViewPtr slice = surfaceSlice(v, bPlane);
-    if (slice->empty())
-        return false;
 
-    // box is the nominal core tile bounds (without overlap).
-    // Shift the grid origin back by m_overlap so buffer-zone points bin into
-    // negative grid indices and flood-fill can cross the tile boundary.
+    // box is the nominal core tile bounds (without overlap), from the BEFORE
+    // splitter (still 'splitter' here). Shift the grid origin back by m_overlap
+    // so buffer-zone points bin into negative grid indices and flood-fill can
+    // cross the tile boundary.
     BOX2D box = splitter->bounds(splitterCoord(coord));
     Point bgOrigin { box.minx - m_overlap, box.miny - m_overlap };
-    GridPtr bg = buildGrid(slice, bgOrigin);
-    bg->findShapes(2);
 
-    // Remove shapes whose center is outside the core tile. These are pure
-    // buffer-zone blobs that belong to an adjacent cell's core area.
+    // Drop shapes whose center is outside the core tile (pure buffer-zone blobs
+    // belonging to an adjacent cell) or smaller than the minimum size.
     auto inCoreBox = [&](const Shape& s, const Point& origin, const BOX2D& core) {
         double utmX = origin.x + (s.exactCenter().x + 0.5) * m_gridLen;
         double utmY = origin.y + (s.exactCenter().y + 0.5) * m_gridLen;
         return utmX >= core.minx && utmX < core.maxx &&
                utmY >= core.miny && utmY < core.maxy;
     };
-
-    auto& bgShapes = bg->shapes();
-    bgShapes.erase(
-        std::remove_if(bgShapes.begin(), bgShapes.end(),
+    auto pruneShapes = [&](GridPtr& g, const Point& origin, const BOX2D& core) {
+        auto& sh = g->shapes();
+        sh.erase(std::remove_if(sh.begin(), sh.end(),
             [&](const Shape& s){
-                return !inCoreBox(s, bgOrigin, box) ||
-                       s.size() < (size_t)m_minShape;
-            }),
-        bgShapes.end());
+                return !inCoreBox(s, origin, core) || s.size() < (size_t)m_minShape;
+            }), sh.end());
+    };
 
     splitter = dynamic_cast<SplitterFilter *>(m_afterMgr.getStage());
     v = splitter->view(splitterCoord(coord));
@@ -400,99 +422,153 @@ bool Atlas::process(Coord coord, Point& offset, double spread)
         else
             hist = histogram(v, Dimension::Id::Z, debugView, "After");
     PlaneFit aPlane = fitPlane(v);
-    slice = surfaceSlice(v, aPlane);
-    if (slice->empty())
-        return false;
+    PointViewPtr afterView = v;
 
-    // The splitter for the "after" tiles is offset by m_shift.
-    // If we want the grid to line up with the tile, the offset should be
-    // m_shift, but we use an offset here that tries to account for what
-    // we've learned since we started processing.
-    //
-    // Note here that "box" is the origin of the BEFORE points.
+    // The "after" tile grid is placed at the BEFORE origin shifted by the
+    // current displacement estimate ("box" is the origin of the BEFORE points).
     BOX2D afterCore { box.minx + offset.x, box.miny + offset.y,
                       box.maxx + offset.x, box.maxy + offset.y };
     Point agOrigin { box.minx + offset.x - m_overlap, box.miny + offset.y - m_overlap };
-    GridPtr ag = buildGrid(slice, agOrigin);
-    ag->findShapes(2);
 
-    auto& agShapes = ag->shapes();
-    agShapes.erase(
-        std::remove_if(agShapes.begin(), agShapes.end(),
-            [&](const Shape& s){
-                return !inCoreBox(s, agOrigin, afterCore) ||
-                       s.size() < (size_t)m_minShape;
-            }),
-        agShapes.end());
+    // Sort each cloud by height above its plane ONCE; bands are sliced from the
+    // rank below rather than re-sorting per band.
+    std::vector<PointId> bRank = rankByResidual(beforeView, bPlane);
+    std::vector<PointId> aRank = rankByResidual(afterView, aPlane);
 
-    sortShapes(bg);
-    sortShapes(ag);
-
-    if (m_dumpij == coord)
+    // Detect and match shapes over m_slices contiguous residual bands of the top
+    // 'topfrac', pooling the per-pair displacements. With m_slices == 1 the band
+    // is [1-topfrac, 1] -- the original top slice -- so the result is identical
+    // to the single-slice path. Splitting the top fraction into height bands lets
+    // features that merge into one blob at a single threshold be detected
+    // separately (more candidate shapes -> more matches). Bands run top-first and
+    // a pair is dropped if its before-centroid coincides with one already pooled
+    // from a higher band, so a feature spanning bands is counted once -- keeping
+    // MATCH_COUNT a count of distinct matches for the downstream sigma=RMS/sqrt(N).
+    std::vector<double> pairX, pairY, pairZ;
+    std::vector<Point> centers;   // before-centroid (UTM) of each pooled pair
+    for (int k = m_slices - 1; k >= 0; --k)
     {
-        bg->draw(0, 0, 49, 49, false);
-        ag->draw(0, 0, 49, 49, false);
-        bg->draw(0, 0, 49, 49, true);
-        ag->draw(0, 0, 49, 49, true);
+        double lo = (1.0 - m_dumpfrac) + (double)k * (m_dumpfrac / m_slices);
+        // Pin the top band's upper edge to 1.0 so floating-point error in
+        // k*topfrac/N can't drop the single highest-residual point.
+        double hi = (k == m_slices - 1) ? 1.0
+                  : (1.0 - m_dumpfrac) + (double)(k + 1) * (m_dumpfrac / m_slices);
+
+        PointViewPtr bSlice = sliceFromRank(beforeView, bRank, lo, hi);
+        PointViewPtr aSlice = sliceFromRank(afterView, aRank, lo, hi);
+        if (bSlice->empty() || aSlice->empty())
+            continue;
+
+        GridPtr bg = buildGrid(bSlice, bgOrigin);
+        bg->findShapes(2);
+        pruneShapes(bg, bgOrigin, box);
+
+        GridPtr ag = buildGrid(aSlice, agOrigin);
+        ag->findShapes(2);
+        pruneShapes(ag, agOrigin, afterCore);
+
+        sortShapes(bg);
+        sortShapes(ag);
+
+        if (m_dumpij == coord && k == 0)
+        {
+            bg->draw(0, 0, 49, 49, false);
+            ag->draw(0, 0, 49, 49, false);
+            bg->draw(0, 0, 49, 49, true);
+            ag->draw(0, 0, 49, 49, true);
+        }
+
+        std::vector<ShapePair> shapes = matchShapes(bg, ag, spread, bPlane, aPlane);
+        recordShapes(bg, true,  coord, bgOrigin, shapes);
+        recordShapes(ag, false, coord, agOrigin, shapes);
+        size_t priorBands = centers.size();
+        collectPairDisplacements(bg, ag, shapes, pairX, pairY, pairZ,
+            centers, priorBands);
     }
 
-    std::vector<ShapePair> shapes = matchShapes(bg, ag, spread);
-    recordShapes(bg, true,  coord, bgOrigin, shapes);
-    recordShapes(ag, false, coord, agOrigin, shapes);
-    if (shapes.empty())
+    if (pairX.empty())
         return false;
-    auto [mean, median, rmsResidual, mad] = calculateOffset(bg, ag, shapes);
+
+    auto [mean, median, rmsResidual, mad] = aggregateOffset(pairX, pairY, pairZ);
     offset = mean;
     m_field.setMedianOffset(coord, median);
     m_field.setMadOffset(coord, mad);
-    m_field.setMatchQuality(coord, shapes.size(), rmsResidual);
+    m_field.setMatchQuality(coord, pairX.size(), rmsResidual);
 
     if (m_ncc)
     {
-        // Rasterize the full flier-removed clouds (not the top slice — NCC
-        // wants the whole surface, the slice exists only for blob detection)
-        // over the core tile plus the overlap buffer. The after raster
-        // covers the same area shifted by the converged shape-match offset,
-        // with a search margin; cells outside the after view's coverage stay
-        // NaN and drop out of the correlation. NCC then measures the
-        // residual displacement the shape match missed.
-        int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
-        int rh = rw;
-        int R = m_nccRadius;
-        double margin = R * m_nccLen;
-
-        // Splat kernel adapts to the sparser of the two tiles: dense tiles
-        // get sharp single-cell binning (best subpixel precision), sparse
-        // tiles get progressively wider Gaussian splats so the before/after
-        // rasters still overlap. Both rasters use the same kernel to keep
-        // the smoothing symmetric.
-        double density = (double)std::min(beforeView->size(), v->size()) /
-            ((double)rw * rh);
-        int kernel = density >= 0.15 ? 0 : (density >= 0.05 ? 1 : 2);
-
-        Raster br = buildRaster(beforeView,
-            {box.minx - m_overlap, box.miny - m_overlap}, rw, rh, bPlane,
-            kernel);
-        Raster ar = buildRaster(v,
-            {box.minx - m_overlap + offset.x - margin,
-             box.miny - m_overlap + offset.y - margin},
-            rw + 2 * R, rh + 2 * R, aPlane, kernel);
-
-        auto [residual, peak, onEdge] = nccOffset(br, ar, R);
-        if (peak >= -1.0)
-            m_field.setNccPeak(coord, (float)peak);
-
-        // Accept the refinement only with a confident, interior peak.
-        // The refined total goes to the NCC bands; bands 1-13 and the
-        // neighbor-seeding field keep the pure shape-match result so the
-        // two estimates stay directly comparable per cell.
-        const double minPeak = 0.5;
-        if (peak >= minPeak && !onEdge)
-            m_field.setNccOffset(coord,
-                { offset.x + residual.x, offset.y + residual.y });
+        // Defer the (pure-compute) NCC refinement. The shape-match offset for
+        // this cell has converged and feeds nothing downstream of itself, so
+        // capture the inputs and refine all cells in parallel after the serial
+        // seeding spiral completes. See nccPass().
+        m_nccWork.push_back({ coord, beforeView, v, bPlane, aPlane, box, offset });
     }
 
     return true;
+}
+
+
+// Pure-compute NCC refinement of every cell captured during processGrid, run in
+// parallel. Each work item is independent: it reads its own (already
+// materialized) flier-removed views and writes only its own Field cells
+// (m_nccX/Y/Peak), which are preallocated, so distinct-cell writes need no
+// synchronization. No PDAL view extraction happens here -- that all occurred in
+// the serial spiral -- so the loop is just rasterization + ZNCC arithmetic.
+//
+// Bands 1-13 and the neighbor-seeding field keep the pure shape-match result, so
+// the two estimates stay directly comparable per cell. Output is numerically
+// identical to the previous inline path (bands 1-13 and NCC_PEAK bit-identical;
+// NCC_X/Y may differ by <1 ULP on rare cells from compiler FMA contraction in a
+// different inlining context).
+void Atlas::nccPass()
+{
+    using namespace pdal;
+
+    // Rasterize the full flier-removed clouds (not the top slice -- NCC wants
+    // the whole surface, the slice exists only for blob detection) over the
+    // core tile plus the overlap buffer. The after raster covers the same area
+    // shifted by the converged shape-match offset, with a search margin; cells
+    // outside the after view's coverage stay NaN and drop out of the
+    // correlation. NCC then measures the residual displacement the shape match
+    // missed.
+    int rw = (int)std::ceil((m_len + 2 * m_overlap) / m_nccLen);
+    int rh = rw;
+    int R = m_nccRadius;
+    double margin = R * m_nccLen;
+    const double minPeak = 0.5;
+
+    long long n = (long long)m_nccWork.size();
+    #pragma omp parallel for schedule(dynamic, 16)
+    for (long long i = 0; i < n; ++i)
+    {
+        const NccWork& w = m_nccWork[i];
+
+        // Splat kernel adapts to the sparser of the two tiles: dense tiles get
+        // sharp single-cell binning (best subpixel precision), sparse tiles get
+        // progressively wider Gaussian splats so the before/after rasters still
+        // overlap. Both rasters use the same kernel to keep the smoothing
+        // symmetric.
+        double density = (double)std::min(w.before->size(), w.after->size()) /
+            ((double)rw * rh);
+        int kernel = density >= 0.15 ? 0 : (density >= 0.05 ? 1 : 2);
+
+        Raster br = buildRaster(w.before,
+            {w.box.minx - m_overlap, w.box.miny - m_overlap}, rw, rh, w.bPlane,
+            kernel);
+        Raster ar = buildRaster(w.after,
+            {w.box.minx - m_overlap + w.offset.x - margin,
+             w.box.miny - m_overlap + w.offset.y - margin},
+            rw + 2 * R, rh + 2 * R, w.aPlane, kernel);
+
+        auto [residual, peak, onEdge] = nccOffset(br, ar, R);
+        if (peak >= -1.0)
+            m_field.setNccPeak(w.coord, (float)peak);
+
+        // Accept the refinement only with a confident, interior peak.
+        if (peak >= minPeak && !onEdge)
+            m_field.setNccOffset(w.coord,
+                { w.offset.x + residual.x, w.offset.y + residual.y });
+    }
 }
 
 
@@ -514,63 +590,94 @@ void Atlas::dumpShapes(GridPtr& g)
 }
 
 
-std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread)
+std::vector<ShapePair> Atlas::matchShapes(GridPtr& bg, GridPtr& ag, double spread,
+    const PlaneFit& bPlane, const PlaneFit& aPlane)
 {
     std::vector<ShapePair> matches;
-    double threshold = std::clamp(spread, 2.5, 4.0);
+    double threshold = std::clamp(spread, m_matchMin, m_matchMax);
 
-    // Build a list of shape pointers
-    std::list<Shape *> asp;
-    for (Shape& s : ag->shapes())
-        asp.push_back(&s);
-
-    int matchCount = 0;
-    for (const Shape& s : bg->shapes())
-    {
-        std::list<Shape *>::iterator exactMatch;
-        double minExactDist = (std::numeric_limits<double>::max)();
-        for (auto it = asp.begin(); it != asp.end(); ++it)
+    // Mean height per shape — a descriptor that lets us admit matches at larger
+    // horizontal distance without false pairings: a genuine pair has nearly
+    // equal mean height, while a spurious match to a horizontally-distant shape
+    // on sloped ground does not. With --zgate-plane the height is taken above
+    // the tile's fitted plane instead of absolute Z, which cancels the bulk
+    // flow-down-slope term (= displacement x tan(slope)) so one zgate works
+    // across baselines. The plane is affine, so the mean height-above-plane of
+    // a shape is just plane.residual at its centroid (no per-point pass).
+    // Computed once per shape (reusing Grid::location) so the O(n^2) mutual-NN
+    // search below stays cheap. Only populated when the gate is on.
+    std::unordered_map<const Shape *, double> meanZ;
+    auto loadHeights = [&](GridPtr& g, const PlaneFit& plane) {
+        Point c, hi;
+        for (Shape& s : g->shapes())
         {
-            Shape *ts = *it;
+            g->location(&s, c, hi);
+            meanZ[&s] = m_zGatePlane ? plane.residual(c.x, c.y, c.z) : c.z;
+        }
+    };
+    if (m_zGate > 0)
+    {
+        loadHeights(bg, bPlane);
+        loadHeights(ag, aPlane);
+    }
 
-            double sizeRatio = (double)s.size() / ts->size();
+    // Closest candidate passing the 3:1 size-ratio gate and, when enabled, the
+    // mean-height gate. Returns the candidate and its horizontal distance.
+    auto nearest = [&](const Shape& s, std::vector<Shape>& candidates)
+        -> std::pair<const Shape *, double>
+    {
+        const Shape *best = nullptr;
+        double minDist = (std::numeric_limits<double>::max)();
+        for (const Shape& ts : candidates)
+        {
+            double sizeRatio = (double)s.size() / ts.size();
             if (sizeRatio > 3.0 || sizeRatio < (1.0 / 3.0))
                 continue;
+            if (m_zGate > 0 && std::abs(meanZ[&s] - meanZ[&ts]) > m_zGate)
+                continue;
 
-            Point bp = s.exactCenter();
-            Point ap = ts->exactCenter();
-            double exactDist = std::sqrt(std::pow(bp.x - ap.x, 2) + std::pow(bp.y - ap.y, 2));
-            if (exactDist < minExactDist)
+            Point sp = s.exactCenter();
+            Point tp = ts.exactCenter();
+            double dist = std::sqrt(std::pow(sp.x - tp.x, 2) +
+                                    std::pow(sp.y - tp.y, 2));
+            if (dist < minDist)
             {
-                minExactDist = exactDist;
-                exactMatch = it;
+                minDist = dist;
+                best = &ts;
             }
         }
-        if (minExactDist > threshold)
+        return { best, minDist };
+    };
+
+    // Mutual nearest neighbor: accept a pair only if each shape is the other's
+    // closest eligible candidate. One-to-one by construction and independent of
+    // visit order, so a large shape can't claim an after-shape that better
+    // matches a different before-shape (the old greedy matcher's failure mode).
+    for (const Shape& s : bg->shapes())
+    {
+        auto [after, dist] = nearest(s, ag->shapes());
+        if (!after || dist > threshold)
+            continue;
+        if (nearest(*after, bg->shapes()).first != &s)
             continue;
 
         if (m_dumpij == m_coord)
-            std::cout << "Match: " << s.id() << " = " << (*exactMatch)->id() << "\n";
-        ShapePair sp {&s, *exactMatch};
-        matches.push_back(sp);
-        asp.erase(exactMatch);
-        matchCount++;
-        if (asp.empty())
-            break;
+            std::cout << "Match: " << s.id() << " = " << after->id() << "\n";
+        matches.push_back({ &s, after });
     }
-/**
-    std::cerr << "Matched " << matchCount << " of " << bg->shapes().size() <<
-        "!\n\n";
-**/
     return matches;
 }
 
 
-std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, GridPtr& ag,
-    const std::vector<ShapePair>& shapes)
+// Append the per-pair (x, y, z) displacement of each matched shape pair to the
+// running vectors. Split out from the aggregation so multiple slice bands can
+// pool their pairs before the mean/median/MAD/RMS are computed once.
+void Atlas::collectPairDisplacements(GridPtr& bg, GridPtr& ag,
+    const std::vector<ShapePair>& shapes,
+    std::vector<double>& pairX, std::vector<double>& pairY,
+    std::vector<double>& pairZ, std::vector<Point>& centers,
+    size_t dedupCount)
 {
-    std::vector<double> pairX, pairY, pairZ;
-
     for (const ShapePair& sp : shapes)
     {
         Point bCenter, bHigh;
@@ -579,6 +686,22 @@ std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, Grid
         pdal::BOX2D bExtent = bg->location(sp.first, bCenter, bHigh);
         pdal::BOX2D aExtent = ag->location(sp.second, aCenter, aHigh);
 
+        // Drop a pair whose before-centroid coincides (within one grid cell)
+        // with a pair already pooled from an EARLIER slice band -- the same
+        // feature re-detected at a different height. Only the first dedupCount
+        // centers (prior bands) are checked, so pairs within the current band
+        // are never removed and --slices 1 (dedupCount 0) is unchanged.
+        bool dup = false;
+        for (size_t j = 0; j < dedupCount && j < centers.size(); ++j)
+            if (std::hypot(bCenter.x - centers[j].x,
+                           bCenter.y - centers[j].y) < m_gridLen)
+            {
+                dup = true;
+                break;
+            }
+        if (dup)
+            continue;
+
         pairX.push_back(((aCenter.x - bCenter.x) +
                          (aExtent.minx - bExtent.minx) +
                          (aExtent.maxx - bExtent.maxx)) / 3.0);
@@ -586,8 +709,16 @@ std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, Grid
                          (aExtent.miny - bExtent.miny) +
                          (aExtent.maxy - bExtent.maxy)) / 3.0);
         pairZ.push_back(aCenter.z - bCenter.z);
+        centers.push_back(bCenter);
     }
+}
 
+
+// Mean / median / RMS-residual / MAD over the pooled per-pair displacements.
+std::tuple<Point, Point, double, Point> Atlas::aggregateOffset(
+    const std::vector<double>& pairX, const std::vector<double>& pairY,
+    const std::vector<double>& pairZ)
+{
     auto calcMedian = [](std::vector<double> v) -> double {
         std::sort(v.begin(), v.end());
         size_t n = v.size();
@@ -604,7 +735,7 @@ std::tuple<Point, Point, double, Point> Atlas::calculateOffset(GridPtr& bg, Grid
     double sumX = std::accumulate(pairX.begin(), pairX.end(), 0.0);
     double sumY = std::accumulate(pairY.begin(), pairY.end(), 0.0);
     double sumZ = std::accumulate(pairZ.begin(), pairZ.end(), 0.0);
-    size_t n = shapes.size();
+    size_t n = pairX.size();
 
     Point mean { sumX / n, sumY / n, sumZ / n };
     Point median { calcMedian(pairX), calcMedian(pairY), calcMedian(pairZ) };
@@ -739,16 +870,22 @@ PlaneFit Atlas::fitPlane(pdal::PointViewPtr v)
 // modified; only slice membership depends on the plane.
 pdal::PointViewPtr Atlas::surfaceSlice(pdal::PointViewPtr v, const PlaneFit& plane)
 {
+    // The top 'topfrac' of points = the residual-rank band [1 - topfrac, 1].
+    return sliceFromRank(v, rankByResidual(v, plane), 1.0 - m_dumpfrac, 1.0);
+}
+
+
+// PointIds of v sorted ascending by height above the plane (0 = lowest above-
+// plane point). Computing the rank once and slicing bands from it keeps
+// multi-slice O(n log n) per cloud instead of re-sorting for every band.
+std::vector<pdal::PointId> Atlas::rankByResidual(pdal::PointViewPtr v,
+    const PlaneFit& plane)
+{
     using namespace pdal;
 
-    PointViewPtr slice = v->makeNew();
-    size_t n = v->size();
-    if (n == 0)
-        return slice;
-
     std::vector<std::pair<double, PointId>> residuals;
-    residuals.reserve(n);
-    for (PointId i = 0; i < n; ++i)
+    residuals.reserve(v->size());
+    for (PointId i = 0; i < v->size(); ++i)
     {
         double x = v->getFieldAs<double>(Dimension::Id::X, i);
         double y = v->getFieldAs<double>(Dimension::Id::Y, i);
@@ -757,8 +894,33 @@ pdal::PointViewPtr Atlas::surfaceSlice(pdal::PointViewPtr v, const PlaneFit& pla
     }
     std::sort(residuals.begin(), residuals.end());
 
-    for (size_t i = (size_t)(n * (1.0 - m_dumpfrac)); i < n; ++i)
-        slice->appendPoint(*v, residuals[i].second);
+    std::vector<PointId> rank;
+    rank.reserve(residuals.size());
+    for (const auto& pr : residuals)
+        rank.push_back(pr.second);
+    return rank;
+}
+
+
+// Points whose residual rank falls in [rankLo, rankHi) (0 = lowest above-plane,
+// 1 = highest), from a precomputed rank. surfaceSlice is the band [1-topfrac, 1];
+// multi-slice (--slices N) splits that into N contiguous bands so locally-high
+// features that merge at one threshold are detected separately. Points are not
+// modified; only band membership uses the plane.
+pdal::PointViewPtr Atlas::sliceFromRank(pdal::PointViewPtr v,
+    const std::vector<pdal::PointId>& rank, double rankLo, double rankHi)
+{
+    pdal::PointViewPtr slice = v->makeNew();
+    size_t n = rank.size();
+    if (n == 0)
+        return slice;
+
+    size_t loIdx = (size_t)(n * rankLo);
+    size_t hiIdx = (size_t)(n * rankHi);
+    if (hiIdx > n)
+        hiIdx = n;
+    for (size_t i = loIdx; i < hiIdx; ++i)
+        slice->appendPoint(*v, rank[i]);
     return slice;
 }
 
