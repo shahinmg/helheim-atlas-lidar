@@ -13,7 +13,10 @@
 
 ## Build
 
-    ./build.sh
+```bash
+cd displacement
+./build.sh
+```
 
 ## How to run displacement
 
@@ -58,3 +61,39 @@ Outputs:
 ```
 
 The xshift/yshift rule of thumb for a 6-hour scan is 6.4 m / -0.51 m; scale linearly with time for other intervals.
+
+
+## Bucket layout
+
+The dataset is publicly available at `s3://atlas-lidar-helheim` (no credentials required).
+
+```
+s3://atlas-lidar-helheim/
+├── copc/
+│   ├── north/          # ATLAS North Cloud Optimized Point Clouds (.copc.laz)
+│   └── south/          # ATLAS South Cloud Optimized Point Clouds (.copc.laz)
+├── dem/
+│   ├── ATLAS-North/    # ATLAS North digital elevation models (GeoTIFF)
+│   └── ATLAS-South/    # ATLAS South digital elevation models (GeoTIFF)
+└── velocity/
+    ├── ATLAS-North/    # ATLAS North glacier surface velocity rasters (GeoTIFF)
+    └── ATLAS-South/    # ATLAS South glacier surface velocity rasters (GeoTIFF)
+```
+
+File names follow the convention `YYMMDD_HHMMSS` (UTC). Elevation models are orthometric heights with the 49 m EIGEN-6C4 geoid removed. Velocity GeoTIFFs have 4 bands: absolute horizontal velocity, X velocity, Y velocity, and Z velocity.
+
+To browse the bucket:
+
+```bash
+aws s3 ls --no-sign-request s3://atlas-lidar-helheim/
+```
+
+Copy a file to your local machine:
+
+```bash
+aws s3 cp --no-sign-request s3://atlas-lidar-helheim/dem/ATLAS-North/191215_121054_idw_geoid_rm.cog.tif .
+```
+
+Point clouds can also be viewed in a browser. For example, an ATLAS North point cloud from 2023-10-15 00:04:14:
+
+[231015_000414.copc.laz in COPC Viewer](https://viewer.copc.io/?copc=https://atlas-lidar-helheim.s3.amazonaws.com/copc/north/231015_000414.copc.laz)
