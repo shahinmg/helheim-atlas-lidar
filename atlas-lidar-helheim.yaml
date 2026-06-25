@@ -8,12 +8,12 @@ Tags:
   - Terrestrial laser scanner
   - Iceberg calving
   - Ice velocity
-License:
+License: https://github.com/CRREL/helheim-atlas-lidar/LICENSE
 Resources:
   - Description: Project data diles
     ARN: arn:aws:s3:::atlas-lidar-helheim
     Region: us-west-2
-    Type: arn:aws:s3:::atlas-lidar-helheim
+    Type: S3 bucket
 DataAtWork:
   - Title: Calving Mechanisms Inferred From Observations of Surface Depressions at Helheim Glacier, Greenland
     URL: https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2024JF008059
