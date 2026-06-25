@@ -93,7 +93,3 @@ Copy a file to your local machine:
 ```bash
 aws s3 cp --no-sign-request s3://atlas-lidar-helheim/dem/ATLAS-North/191215_121054_idw_geoid_rm.cog.tif .
 ```
-
-Point clouds can also be viewed in a browser. For example, an ATLAS North point cloud from 2023-10-15 00:04:14:
-
-[231015_000414.copc.laz in COPC Viewer](https://viewer.copc.io/?copc=https://atlas-lidar-helheim.s3.amazonaws.com/copc/north/231015_000414.copc.laz)
