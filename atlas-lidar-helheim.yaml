@@ -1,21 +1,25 @@
 Name: Helheim ATLAS LiDAR
 Description: The Autonomous Terrestrial Laser Scanning (ATLAS) systems are located along the margins of Helheim Glacier in Southeast Greenland. The ATLAS systems are unique, state-of-the-art, fully autonomous ground based Light Detection and Ranging (LiDAR) systems designed to collect long-range (10km) high-resolution point cloud data over the terminus region of the glacier every 6-hours (every 24-hours during winter months). These data were captured to better understand temporal glacier dynamics related to ice-ocean interactions and correlations to climate change. Data provided are geo-registered point clouds, derived glacier velocity models and surface elevation models. 
-Contact: David Finnegan (David.finnegan@usace.army.mi), Howard Butler (howard@hobu.co), Michael Shahin (shahinmg@sas.upenn.edu)
+Contact: https://github.com/CRREL/helheim-atlas-lidar/issues
 ManagedBy: US Army Corps of Engineers, Cold Regions Research & Engineering Laboratory
 UpdateFrequency: Yearly
 Tags:
-  - Greenland
-  - Terrestrial laser scanner
-  - Iceberg calving
-  - Ice velocity
-License: https://github.com/CRREL/helheim-atlas-lidar/LICENSE
+  - aws-pds
+  - terrestrial laser scanner
+  - earth observation
+  - cryosphere
+  - glaciology
+  - greenland
+  - ice velocity
+  - digital elevation models
+License: https://www.gnu.org/licenses/gpl-3.0.html
 Resources:
-  - Description: Project data diles
+  - Description: Cloud Optimized Point Clouds (COPC), surface elevation models (DEM), and glacier surface velocity rasters
     ARN: arn:aws:s3:::atlas-lidar-helheim
     Region: us-west-2
-    Type: S3 bucket
+    Type: S3 Bucket
 DataAtWork:
   - Title: Calving Mechanisms Inferred From Observations of Surface Depressions at Helheim Glacier, Greenland
     URL: https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2024JF008059
-    AuthorName: Michael Shahin
+    AuthorName: Shahin et al.
     AuthorURL: https://github.com/shahinmg
