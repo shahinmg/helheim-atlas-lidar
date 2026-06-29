@@ -51,6 +51,8 @@ Outputs:
 - `<before_stem>_<after_stem>.geojson`: matched shape polygons (opt-in via `--geojson`)
 - `<before_stem>_<after_stem>.svg`: displacement arrow field (opt-in via `--svg`)
 
+> **Note on CRS:** the `atlas` displacement output is **EPSG:32624** (WGS 84 / UTM zone 24N), whereas the published DEM and velocity products in the S3 bucket are **EPSG:3413** (WGS 84 / NSIDC Sea Ice Polar Stereographic North). Reproject before comparing the two.
+
 ### Output band layout
 
 | Band | Name | Description |
@@ -122,7 +124,7 @@ s3://atlas-lidar-helheim/
     └── ATLAS-South/    # ATLAS South glacier surface velocity rasters (GeoTIFF)
 ```
 
-File names follow the convention `YYMMDD_HHMMSS` (UTC). Elevation models are orthometric heights with the 49 m EIGEN-6C4 geoid removed. Velocity GeoTIFFs have 4 bands: absolute horizontal velocity, X velocity, Y velocity, and Z velocity.
+File names follow the convention `YYMMDD_HHMMSS` (UTC). Elevation models are orthometric heights with the 49 m EIGEN-6C4 geoid removed. Velocity GeoTIFFs have 4 bands: absolute horizontal velocity, X velocity, Y velocity, and Z velocity. The DEM and velocity products are in EPSG:3413 (WGS 84 / NSIDC Sea Ice Polar Stereographic North) — note this differs from the EPSG:32624 displacement output of the `atlas` tool above.
 
 To browse the bucket:
 
