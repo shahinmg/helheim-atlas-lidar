@@ -7,15 +7,15 @@ Created on Fri Oct 30 19:33:14 2020
 """
 
 import argparse
+import json
 import subprocess
+import sys
 import os
 import logging
 import numpy as np
 from multiprocessing import Pool
 #from subProcessUtils import date_sort
 import pandas as pd
-from obstore.store import S3Store
-import obstore
 from datetime import datetime
 import re
 from tqdm import tqdm
@@ -23,7 +23,7 @@ from tqdm import tqdm
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 parser = argparse.ArgumentParser(
-    description="Run atlas --ncc in parallel on consecutive ATLAS South scan pairs from S3.")
+    description="Run atlas --ncc in parallel on consecutive scan pairs from S3 (default: ATLAS South).")
 parser.add_argument("--out-dir", required=True,
                     help="output directory for the displacement GeoTIFFs")
 parser.add_argument("--atlas", default=os.path.join(REPO_ROOT, "displacement", "build", "atlas"),
@@ -34,9 +34,21 @@ parser.add_argument("--end", type=datetime.fromisoformat, default=datetime(2019,
                     help="last scan time to include, YYYY-MM-DD[THH:MM] (default: 2019-12-31)")
 parser.add_argument("--procs", type=int, default=16,
                     help="number of atlas runs in parallel (default: %(default)s)")
+parser.add_argument("--bucket", default="atlas-lidar-helheim",
+                    help="S3 bucket holding the scans (default: %(default)s)")
+parser.add_argument("--prefix", default="copc/south/",
+                    help="key prefix of the .copc.laz scans (default: %(default)s)")
+parser.add_argument("--region", default="us-west-2",
+                    help="region of the bucket (default: %(default)s)")
+parser.add_argument("--private", action="store_true",
+                    help="bucket needs AWS credentials: list it with your AWS CLI profile and "
+                         "give atlas s3:// URLs instead of public https URLs")
 opts = parser.parse_args()
 if not os.path.isfile(opts.atlas):
     parser.error(f"atlas binary not found: {opts.atlas} (build it, or pass --atlas)")
+if opts.private:
+    # PDAL takes the bucket region from these; the ~/.aws/config default may be a different region
+    os.environ["AWS_REGION"] = os.environ["AWS_DEFAULT_REGION"] = opts.region
 
 LOG_FILE = f"./log/atlas_runs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -57,13 +69,15 @@ Command for displacement calcs
 """
 
 
-# get atlas-lidar-helheim bucket
-# skip_signature is like --no-sign-request
-bucket = "atlas-lidar-helheim"
-region = "us-west-2"
-store = S3Store(bucket, region=region, skip_signature=True)
-listing = obstore.list(store, prefix="copc/south/").collect()
-keys = sorted(obj["path"] for obj in listing if obj["path"].endswith(".copc.laz"))
+# list the scans with the AWS CLI: anonymous (--no-sign-request) unless --private
+list_cmd = ["aws", "s3api", "list-objects-v2", "--bucket", opts.bucket, "--prefix", opts.prefix,
+            "--region", opts.region, "--query", "Contents[].Key", "--output", "json"]
+if not opts.private:
+    list_cmd.append("--no-sign-request")
+listing = subprocess.run(list_cmd, capture_output=True, text=True)
+if listing.returncode != 0:
+    sys.exit(f"listing s3://{opts.bucket}/{opts.prefix} failed:\n{listing.stderr.strip()}")
+keys = sorted(k for k in (json.loads(listing.stdout) or []) if k.endswith(".copc.laz"))
 
 DATE_START   = opts.start
 DATE_END     = opts.end
@@ -89,12 +103,16 @@ dates_filtered = [d for _, d in filtered]
 print(f"{len(keys_filtered)} scans: {filtered[0][1]} → {filtered[-1][1]}")
 
 
-def aws_http(key, bucket=bucket, region=region):
+def scan_url(key):
     """
-    example: https://atlas-lidar-helheim.s3.us-west-2.amazonaws.com/copc/south/230108_131655.copc.laz
+    URL atlas reads the scan from. Public bucket:
+      https://atlas-lidar-helheim.s3.us-west-2.amazonaws.com/copc/south/230108_131655.copc.laz
+    --private bucket (PDAL signs the request with your AWS credentials):
+      s3://<bucket>/<prefix>/<scan>.copc.laz
     """
-
-    return f'https://{bucket}.s3.{region}.amazonaws.com/{key}'
+    if opts.private:
+        return f's3://{opts.bucket}/{key}'
+    return f'https://{opts.bucket}.s3.{opts.region}.amazonaws.com/{key}'
 
 ## Run atlas command like commented command below import statements and rename the svg file
 ## to the same base name as laz and move
@@ -114,8 +132,8 @@ for i in range(len(filtered)-1):
     key_j, time_j = filtered[i+1]
 
     # turn keys to aws https
-    key = aws_http(key)
-    key_j= aws_http(key_j)
+    key = scan_url(key)
+    key_j= scan_url(key_j)
 
     # file_n, time_j = tupj
     pd_time_2 = pd.to_datetime(time_j)
