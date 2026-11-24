@@ -23,6 +23,7 @@ Options:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import argparse
@@ -38,10 +39,24 @@ from tqdm import tqdm
 # the outer process reads these to advance one shared tqdm progress bar.
 PROGRESS_TOKEN = "__PROGRESS__"
 
-GRASS_ENV_BIN = "/home/m484s199/miniconda3/envs/grass_env/bin"
-GRASS_BIN = f"{GRASS_ENV_BIN}/grass"
-GDAL_TRANSLATE = f"{GRASS_ENV_BIN}/gdal_translate"
-GDALINFO = f"{GRASS_ENV_BIN}/gdalinfo"
+def _find_grass_env_bin() -> str:
+    """Locate the bin/ dir holding grass, gdal_translate and gdalinfo.
+
+    Order: $GRASS_ENV_BIN override, then the dir of `grass` on PATH (i.e. the
+    active conda env), so the same script runs on any machine with grass_env
+    activated. Returns "" if not found; main() reports the error.
+    """
+    override = os.environ.get("GRASS_ENV_BIN")
+    if override:
+        return override
+    grass = shutil.which("grass")
+    return os.path.dirname(grass) if grass else ""
+
+
+GRASS_ENV_BIN = _find_grass_env_bin()
+GRASS_BIN = os.path.join(GRASS_ENV_BIN, "grass")
+GDAL_TRANSLATE = os.path.join(GRASS_ENV_BIN, "gdal_translate")
+GDALINFO = os.path.join(GRASS_ENV_BIN, "gdalinfo")
 
 
 def sanitize(name: str) -> str:
@@ -321,6 +336,15 @@ def _pump_progress(proc, pbar, lock):
 def main():
     args = parse_args()
 
+    missing = [b for b in (GRASS_BIN, GDAL_TRANSLATE, GDALINFO)
+               if not os.access(b, os.X_OK)]
+    if missing:
+        sys.exit(
+            "GRASS/GDAL executables not found: " + ", ".join(missing) + "\n"
+            "Activate the GRASS conda env (conda activate grass_env) or set "
+            "GRASS_ENV_BIN to the env's bin/ directory."
+        )
+
     if not args._inner and "GISBASE" not in os.environ:
         files = []
         for f in args.inputs:
@@ -390,9 +414,17 @@ def main():
         force=True,
     )
 
-    gisbase = os.environ.get(
-        "GISBASE", "/home/m484s199/miniconda3/envs/grass_env/lib/grass85"
-    )
+    # `grass --exec` always sets GISBASE; fall back to the env's lib/grass*
+    # (version-agnostic) only if this was launched some other way.
+    gisbase = os.environ.get("GISBASE")
+    if not gisbase:
+        candidates = sorted(
+            Path(GRASS_ENV_BIN).parent.joinpath("lib").glob("grass[0-9]*")
+        )
+        if not candidates:
+            sys.exit("GISBASE not set and no lib/grass* found next to "
+                     f"{GRASS_ENV_BIN}")
+        gisbase = str(candidates[-1])
     sys.path.insert(0, os.path.join(gisbase, "etc", "python"))
     import grass.script as gs  # noqa: PLC0415
 
