@@ -16,3 +16,5 @@ icp_diag/
 prof_data/
 processing/sweep_matcher_6hr_*
 geoms/
+grass_env.yml
+*.out

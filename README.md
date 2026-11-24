@@ -32,6 +32,7 @@ cores); set `OMP_NUM_THREADS=1` for serial execution.
 ```
 
 - `xshift`/`yshift`: expected bulk displacement in meters (based on Helheim velocity × time between scans)
+- `--classes LIST`: comma-separated LAS classification codes to keep, e.g. `0` or `0,1,2`; all other classes (e.g. 7, low noise) are dropped before tiling. `all` disables the filter (default `0`)
 - `--topfrac F`: top fraction of points (by height above the tile's fitted plane) used as the surface slice (default 0.5)
 - `--gridlen M`: grid cell size in meters for flood-fill shape detection (default 1.0)
 - `--minshape N`: minimum shape size in grid cells; smaller shapes dropped before matching (default 1)

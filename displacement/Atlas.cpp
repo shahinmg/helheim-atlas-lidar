@@ -114,6 +114,10 @@ void Atlas::addArgs()
         "matching for short baselines (default 2.5)", m_matchMin, 2.5);
     m_args.add("matchmax", "Upper bound in meters for the centroid-distance match "
         "threshold; raise to admit more matches (default 4.0)", m_matchMax, 4.0);
+    m_args.add("classes", "Comma-separated LAS classification codes to keep, e.g. "
+        "'0' or '0,1,2'; points of any other class (such as 7, low noise) are "
+        "dropped before tiling. 'all' disables the filter (default 0)",
+        m_classes, std::string("0"));
     m_args.add("tiff", "Output directory for GeoTIFF", m_tiffDir, std::string());
     m_args.add("geojson", "Output directory for shapes GeoJSON (omit to skip)",
         m_geojsonDir, std::string());
@@ -158,6 +162,36 @@ void Atlas::parse(const pdal::StringList& slist)
     if (m_nccRadius * m_nccLen > m_overlap)
         fatal("'nccradius' x 'ncclen' must not exceed the tile overlap (" +
             std::to_string((int)m_overlap) + "m).");
+
+    // Build 'filters.range' limits from the class list. Ranges on the same
+    // dimension are OR'd by filters.range, so "0,2" keeps class 0 or 2.
+    m_classLimits.clear();
+    std::string classArg = m_classes;
+    pdal::Utils::trim(classArg);
+    if (pdal::Utils::tolower(classArg) != "all")
+    {
+        for (std::string tok : pdal::Utils::split2(classArg, ','))
+        {
+            pdal::Utils::trim(tok);
+            int c;
+            size_t used = 0;
+            try
+            {
+                c = std::stoi(tok, &used);
+            }
+            catch (const std::exception&)
+            {
+                used = 0;
+            }
+            if (tok.empty() || used != tok.size() || c < 0 || c > 255)
+                fatal("'classes' must be 'all' or a comma-separated list of "
+                    "integers in [0,255]; got '" + m_classes + "'.");
+            if (!m_classLimits.empty())
+                m_classLimits += ",";
+            m_classLimits += "Classification[" + std::to_string(c) + ":" +
+                std::to_string(c) + "]";
+        }
+    }
 }
 
 void Atlas::run(const pdal::StringList& s)
@@ -237,10 +271,20 @@ void Atlas::load()
     splitterOpts.add("origin_y", m_origin.y);
     splitterOpts.add("buffer", m_overlap);
 
+    // Optional classification filter between reader and splitter, so dropped
+    // classes never reach the flier removal, plane fit or shape detection.
+    Options rangeOpts;
+    rangeOpts.add("limits", m_classLimits);
+    auto classFilter = [&](PipelineManager& mgr, Stage& reader) -> Stage& {
+        if (m_classLimits.empty())
+            return reader;
+        return mgr.makeFilter("filters.range", reader, rangeOpts);
+    };
+
     StageCreationOptions bOps { m_beforeFilename };
     Stage& beforeReader = m_beforeMgr.makeReader(bOps);
     Stage& beforeSplitter = m_beforeMgr.makeFilter("filters.splitter",
-        beforeReader, splitterOpts);
+        classFilter(m_beforeMgr, beforeReader), splitterOpts);
     SplitterFilter& s = dynamic_cast<SplitterFilter&>(beforeSplitter);
     m_beforeMgr.execute(ExecMode::Standard);
 
@@ -253,7 +297,7 @@ void Atlas::load()
     StageCreationOptions aOps { m_afterFilename };
     Stage& afterReader = m_afterMgr.makeReader(aOps);
     Stage& afterSplitter = m_afterMgr.makeFilter("filters.splitter",
-        afterReader, afterSplitterOpts);
+        classFilter(m_afterMgr, afterReader), afterSplitterOpts);
     m_afterMgr.execute(ExecMode::Standard);
 }
 

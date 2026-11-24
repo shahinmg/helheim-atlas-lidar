@@ -138,6 +138,10 @@ private:
     bool m_zGatePlane;
     double m_matchMin;
     double m_matchMax;
+    // LAS classification codes to keep (raw arg string and parsed
+    // 'filters.range' limits). Empty limits = no classification filter.
+    std::string m_classes;
+    std::string m_classLimits;
 
     pdal::PipelineManager m_beforeMgr;
     pdal::PipelineManager m_afterMgr;
