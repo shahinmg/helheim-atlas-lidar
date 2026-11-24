@@ -6,6 +6,7 @@ Created on Fri Oct 30 19:33:14 2020
 @author: laserglaciers
 """
 
+import argparse
 import subprocess
 import os
 import logging
@@ -18,6 +19,24 @@ import obstore
 from datetime import datetime
 import re
 from tqdm import tqdm
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+parser = argparse.ArgumentParser(
+    description="Run atlas in parallel on consecutive ATLAS North scan pairs from S3.")
+parser.add_argument("--out-dir", required=True,
+                    help="output directory for the displacement GeoTIFFs")
+parser.add_argument("--atlas", default=os.path.join(REPO_ROOT, "displacement", "build", "atlas"),
+                    help="path to the atlas binary (default: %(default)s)")
+parser.add_argument("--start", type=datetime.fromisoformat, default=datetime(2019, 1, 1),
+                    help="first scan time to include, YYYY-MM-DD[THH:MM] (default: 2019-01-01)")
+parser.add_argument("--end", type=datetime.fromisoformat, default=datetime(2019, 12, 31),
+                    help="last scan time to include, YYYY-MM-DD[THH:MM] (default: 2019-12-31)")
+parser.add_argument("--procs", type=int, default=16,
+                    help="number of atlas runs in parallel (default: %(default)s)")
+opts = parser.parse_args()
+if not os.path.isfile(opts.atlas):
+    parser.error(f"atlas binary not found: {opts.atlas} (build it, or pass --atlas)")
 
 LOG_FILE = f"./log/atlas_runs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -45,9 +64,9 @@ store = S3Store(bucket, region=region, skip_signature=True)
 listing = obstore.list(store, prefix="copc/north/").collect()
 keys = sorted(obj["path"] for obj in listing if obj["path"].endswith(".copc.laz"))
 
-DATE_START   = datetime(2019, 1, 1)
-DATE_END     = datetime(2019, 12, 31)
-out_dir = '/opt/atlas/helheim-atlas-lidar/output/atlas_north' # output for the displacement tif
+DATE_START   = opts.start
+DATE_END     = opts.end
+out_dir = opts.out_dir # output for the displacement tif
 os.makedirs(out_dir, exist_ok=True)
 
 def parse_date(key):
@@ -126,7 +145,7 @@ for i,laz in enumerate(diff_tups):
         continue
 #    print(f'shift factor: {shift_factor}')
     # print('Calculating displacements between '+' '.join([laz[0],sortDates[i+1][0]]))
-    args = ['/opt/atlas/helheim-atlas-lidar/displacement/build/atlas', copc_1, copc_2,
+    args = [opts.atlas, copc_1, copc_2,
             '--xshift='+str(round(xshift*shift_factor,4)),
             '--yshift='+str(round(yshift*shift_factor,4)),
             '--tiff', out_dir]
@@ -157,7 +176,7 @@ def worker(cmd):
 
 
 if __name__ == "__main__":
-    with Pool(processes=16) as pool:
+    with Pool(processes=opts.procs) as pool:
           results = list(tqdm(pool.imap_unordered(worker, args_list), total=len(args_list)))
 # procs = [ subprocess.Popen(i) for i in args_list[:30]]
 # for p in procs:
