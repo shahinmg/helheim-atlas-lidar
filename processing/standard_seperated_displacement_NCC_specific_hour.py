@@ -198,7 +198,7 @@ def worker(cmd):
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
     _, stderr = proc.communicate()
     if proc.returncode != 0:
-        logging.error("FAILED (rc=%d): %s\n%s", proc.returncode, cmd_str, stderr.decode().strip())
+        logging.error("FAILED (rc=%d): %s\n%s", proc.returncode, cmd_str, stderr.decode(errors="replace").strip())
     else:
         logging.info("DONE (rc=%d): %s", proc.returncode, cmd_str)
 
